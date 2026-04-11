@@ -1,7 +1,7 @@
 import axios from 'axios'
-import type { Project, TestCase, Execution, ExecutionDetail, LLMSettings } from '../types'
+import type { Project, TestCase, Execution, ExecutionDetail, LLMSettings, TestPage } from '../types'
 
-const api = axios.create({ baseURL: '/api' })
+const api = axios.create({ baseURL: 'http://localhost:8001/api' })
 
 // ---- Project ----
 export const projectApi = {
@@ -14,6 +14,18 @@ export const projectApi = {
   delete: (id: string) => api.delete(`/project/${id}`),
   clone: (id: string) => api.post<{ message: string; repo_path: string }>(`/project/${id}/clone`).then(r => r.data),
   pull: (id: string) => api.post<{ message: string }>(`/project/${id}/pull`).then(r => r.data),
+}
+
+// ---- Pages ----
+export const pageApi = {
+  getTree: (projectId: string) => 
+    api.get<{ pages: TestPage[]; total_cases: number }>(`/pages/${projectId}`).then(r => r.data),
+  refresh: (projectId: string) => 
+    api.post<{ pages: TestPage[]; total_cases: number; message: string }>(`/pages/${projectId}/refresh`).then(r => r.data),
+  generateCases: (pageId: string) => 
+    api.post<TestCase[]>(`/pages/${pageId}/generate`).then(r => r.data),
+  getCases: (pageId: string) => 
+    api.get<TestCase[]>(`/pages/${pageId}/cases`).then(r => r.data),
 }
 
 // ---- TestCase ----

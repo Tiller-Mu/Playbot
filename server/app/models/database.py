@@ -10,6 +10,7 @@ from sqlalchemy import (
     String,
     Text,
     Float,
+    text,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -33,8 +34,28 @@ class Project(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
+    pages = relationship("TestPage", back_populates="project", cascade="all, delete-orphan")
     test_cases = relationship("TestCase", back_populates="project", cascade="all, delete-orphan")
     executions = relationship("Execution", back_populates="project", cascade="all, delete-orphan")
+
+
+class TestPage(Base):
+    """页面树节点 - 支持多级目录结构"""
+    __tablename__ = "test_pages"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id"), nullable=False)
+    parent_id = Column(String(36), ForeignKey("test_pages.id"), nullable=True, comment="父节点ID")
+    name = Column(String(200), nullable=False, comment="节点名称")
+    path = Column(String(500), nullable=False, comment="路径片段")
+    full_path = Column(String(1000), nullable=False, comment="完整路径")
+    is_leaf = Column(Boolean, default=False, comment="是否叶子节点（页面）")
+    component_name = Column(String(200), comment="组件名称")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    project = relationship("Project", back_populates="pages")
+    parent = relationship("TestPage", remote_side=[id], backref="children")
+    test_cases = relationship("TestCase", back_populates="page", cascade="all, delete-orphan")
 
 
 class TestCase(Base):
@@ -42,6 +63,7 @@ class TestCase(Base):
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     project_id = Column(String(36), ForeignKey("projects.id"), nullable=False)
+    page_id = Column(String(36), ForeignKey("test_pages.id"), nullable=True, comment="所属页面ID")
     title = Column(String(300), nullable=False)
     description = Column(Text, nullable=False, comment="自然语言描述")
     script_path = Column(String(500), comment=".py 测试脚本路径")
@@ -53,6 +75,7 @@ class TestCase(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     project = relationship("Project", back_populates="test_cases")
+    page = relationship("TestPage", back_populates="test_cases")
     execution_details = relationship("ExecutionDetail", back_populates="test_case", cascade="all, delete-orphan")
 
 
@@ -99,12 +122,24 @@ class AppSettings(Base):
 
 
 # Database engine and session
-engine = create_async_engine(settings.database_url, echo=settings.debug)
+# SQLite 需要启用外键约束
+connect_args = {}
+if "sqlite" in settings.database_url:
+    connect_args = {"check_same_thread": False}
+
+engine = create_async_engine(
+    settings.database_url, 
+    echo=settings.debug,
+    connect_args=connect_args
+)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 async def init_db():
     async with engine.begin() as conn:
+        # SQLite 需要启用外键约束
+        if "sqlite" in settings.database_url:
+            await conn.execute(text("PRAGMA foreign_keys=ON"))
         await conn.run_sync(Base.metadata.create_all)
 
 

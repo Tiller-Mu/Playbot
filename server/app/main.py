@@ -7,7 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core.config import settings
 from app.core.websocket import ws_manager
 from app.models.database import init_db
-from app.routers import project, testcase, generate, execute, settings as settings_router
+from app.routers import project, testcase, generate, execute, settings as settings_router, page_tree
 
 
 @asynccontextmanager
@@ -38,6 +38,7 @@ app.include_router(testcase.router)
 app.include_router(generate.router)
 app.include_router(execute.router)
 app.include_router(settings_router.router)
+app.include_router(page_tree.router)
 
 
 @app.get("/api/health")

@@ -30,6 +30,28 @@ class ProjectOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+# ---- TestPage ----
+class TestPageOut(BaseModel):
+    id: str
+    project_id: str
+    parent_id: str | None
+    name: str
+    path: str
+    full_path: str
+    is_leaf: bool
+    component_name: str | None
+    children: list['TestPageOut'] = []
+    case_count: int = 0
+    
+    model_config = {"from_attributes": True}
+
+
+class TestPageTreeOut(BaseModel):
+    """完整页面树"""
+    pages: list[TestPageOut]
+    total_cases: int
+
+
 # ---- TestCase ----
 class TestCaseCreate(BaseModel):
     project_id: str
@@ -52,6 +74,7 @@ class TestCaseUpdate(BaseModel):
 class TestCaseOut(BaseModel):
     id: str
     project_id: str
+    page_id: str | None
     title: str
     description: str
     script_path: str | None

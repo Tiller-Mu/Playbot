@@ -9,9 +9,24 @@ export interface Project {
   updated_at: string
 }
 
+export interface TestPage {
+  id: string
+  project_id: string
+  parent_id: string | null
+  name: string
+  path: string
+  full_path: string
+  is_leaf: boolean
+  component_name: string | null
+  children?: TestPage[]
+  case_count?: number
+  file_path?: string
+}
+
 export interface TestCase {
   id: string
   project_id: string
+  page_id: string | null
   title: string
   description: string
   script_path: string | null

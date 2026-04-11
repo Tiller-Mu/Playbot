@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { message } from 'ant-design-vue'
-import { PlusOutlined, GithubOutlined, LinkOutlined } from '@ant-design/icons-vue'
+import { PlusOutlined, GithubOutlined, LinkOutlined, EditOutlined } from '@ant-design/icons-vue'
 import type { Project } from '../types'
 import { projectApi } from '../services/api'
 
@@ -10,7 +10,9 @@ const router = useRouter()
 const projects = ref<Project[]>([])
 const loading = ref(false)
 const showModal = ref(false)
+const showEditModal = ref(false)
 const formLoading = ref(false)
+const editingProject = ref<Project | null>(null)
 
 const form = ref({
   name: '',
@@ -52,8 +54,43 @@ async function handleDelete(id: string) {
     await projectApi.delete(id)
     message.success('项目已删除')
     await loadProjects()
-  } catch {
-    message.error('删除失败')
+  } catch (e: any) {
+    const errorMsg = e.response?.data?.detail || e.message || '删除失败'
+    message.error(`删除失败: ${errorMsg}`)
+    console.error('删除项目错误:', e)
+  }
+}
+
+function handleEdit(project: Project) {
+  editingProject.value = project
+  form.value = {
+    name: project.name,
+    git_url: project.git_url,
+    branch: project.branch || 'main',
+    base_url: project.base_url,
+  }
+  showEditModal.value = true
+}
+
+async function handleSaveEdit() {
+  if (!form.value.name || !form.value.git_url || !form.value.base_url) {
+    message.warning('请填写完整信息')
+    return
+  }
+  
+  if (!editingProject.value) return
+  
+  formLoading.value = true
+  try {
+    await projectApi.update(editingProject.value.id, form.value)
+    message.success('项目信息已更新')
+    showEditModal.value = false
+    editingProject.value = null
+    await loadProjects()
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || '更新失败')
+  } finally {
+    formLoading.value = false
   }
 }
 
@@ -78,9 +115,14 @@ onMounted(loadProjects)
               <ProjectOutlined style="margin-right: 8px;" />{{ p.name }}
             </template>
             <template #extra>
-              <a-popconfirm title="确定删除该项目？" @confirm.stop="handleDelete(p.id)">
-                <a-button type="text" danger size="small" @click.stop>删除</a-button>
-              </a-popconfirm>
+              <a-space>
+                <a-button type="text" size="small" @click.stop="handleEdit(p)">
+                  <EditOutlined /> 编辑
+                </a-button>
+                <a-popconfirm title="确定删除该项目？" @confirm.stop="handleDelete(p.id)">
+                  <a-button type="text" danger size="small" @click.stop>删除</a-button>
+                </a-popconfirm>
+              </a-space>
             </template>
             <p><GithubOutlined /> {{ p.git_url }}</p>
             <p><LinkOutlined /> {{ p.base_url }}</p>
@@ -92,6 +134,7 @@ onMounted(loadProjects)
       </a-row>
     </a-spin>
 
+    <!-- 新建项目对话框 -->
     <a-modal v-model:open="showModal" title="新建项目" @ok="handleCreate" :confirmLoading="formLoading">
       <a-form layout="vertical" style="margin-top: 16px;">
         <a-form-item label="项目名称" required>
@@ -101,7 +144,25 @@ onMounted(loadProjects)
           <a-input v-model:value="form.git_url" placeholder="https://github.com/user/repo.git" />
         </a-form-item>
         <a-form-item label="分支">
-          <a-input v-model:value="form.branch" placeholder="main" />
+          <a-input v-model:value="form.branch" placeholder="main 或 master" />
+        </a-form-item>
+        <a-form-item label="被测站点 URL" required>
+          <a-input v-model:value="form.base_url" placeholder="https://example.com" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
+    <!-- 编辑项目对话框 -->
+    <a-modal v-model:open="showEditModal" title="编辑项目" @ok="handleSaveEdit" :confirmLoading="formLoading">
+      <a-form layout="vertical" style="margin-top: 16px;">
+        <a-form-item label="项目名称" required>
+          <a-input v-model:value="form.name" placeholder="如：我的电商平台" />
+        </a-form-item>
+        <a-form-item label="Git 仓库地址" required>
+          <a-input v-model:value="form.git_url" placeholder="https://github.com/user/repo.git" />
+        </a-form-item>
+        <a-form-item label="分支">
+          <a-input v-model:value="form.branch" placeholder="main 或 master" />
         </a-form-item>
         <a-form-item label="被测站点 URL" required>
           <a-input v-model:value="form.base_url" placeholder="https://example.com" />
