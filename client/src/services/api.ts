@@ -62,4 +62,6 @@ export const executeApi = {
 export const settingsApi = {
   getLLM: () => api.get<LLMSettings>('/settings/llm').then(r => r.data),
   updateLLM: (data: LLMSettings) => api.put<LLMSettings>('/settings/llm', data).then(r => r.data),
+  verifyLLM: (data: { llm_endpoint: string; llm_api_key: string; llm_model: string }) => 
+    api.post<{ success: boolean; message: string; model: string; interaction_log: any[] }>('/settings/llm/verify', data).then(r => r.data),
 }

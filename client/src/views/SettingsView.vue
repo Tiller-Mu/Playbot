@@ -23,7 +23,17 @@ const modelProviders = [
     label: '智谱 AI',
     value: 'zhipu',
     endpoint: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-5.1', 'glm-5', 'glm-5-turbo', 'glm-5v-turbo', 'glm-4.7', 'glm-4.7-flash', 'glm-4.6'],
+    models: [
+      'glm-5.1',           // 最新旗舰，Coding 对齐 Claude Opus 4.6
+      'glm-5',             // 高智能基座，编程对齐 Claude Opus 4.5
+      'glm-5-turbo',       // 龙虾增强基座
+      'glm-4.7',           // 高智能模型
+      'glm-4.7-flash',     // 免费模型
+      'glm-4.7-flashx',    // 轻量高速
+      'glm-4.6',           // 超强性能
+      'glm-4.5-air',       // 高性价比
+      'glm-4.5-airx',      // 高性价比-极速版
+    ],
   },
   {
     label: 'MiniMax',
@@ -47,6 +57,8 @@ const modelProviders = [
 
 const loading = ref(false)
 const saveLoading = ref(false)
+const verifyLoading = ref(false)
+const verifyResult = ref<{ success: boolean; message: string; interaction_log?: any[] } | null>(null)
 const selectedProvider = ref<string>('')
 const selectedModel = ref<string>('')
 
@@ -114,6 +126,50 @@ async function handleSave() {
   }
 }
 
+async function handleVerify() {
+  if (!form.value.llm_endpoint || !form.value.llm_api_key || !form.value.llm_model) {
+    message.warning('请填写完整的 LLM 配置')
+    return
+  }
+  
+  // 检查 API Key 是否被脱敏（包含 * 号）
+  if (form.value.llm_api_key.includes('*')) {
+    message.warning('当前显示的是脱敏后的 API Key，请重新输入完整的 API Key 后再验证')
+    return
+  }
+  
+  verifyLoading.value = true
+  verifyResult.value = null
+  
+  try {
+    const result = await settingsApi.verifyLLM({
+      llm_endpoint: form.value.llm_endpoint,
+      llm_api_key: form.value.llm_api_key,
+      llm_model: form.value.llm_model,
+    })
+    
+    verifyResult.value = {
+      success: result.success,
+      message: result.message,
+      interaction_log: result.interaction_log,
+    }
+    
+    if (result.success) {
+      message.success(result.message)
+    } else {
+      message.error(result.message)
+    }
+  } catch (e: any) {
+    verifyResult.value = {
+      success: false,
+      message: '验证请求失败：' + (e.message || '未知错误'),
+    }
+    message.error('验证请求失败')
+  } finally {
+    verifyLoading.value = false
+  }
+}
+
 onMounted(loadSettings)
 </script>
 
@@ -167,9 +223,69 @@ onMounted(loadSettings)
           </a-form-item>
           
           <a-form-item>
-            <a-button type="primary" @click="handleSave" :loading="saveLoading">
-              <SaveOutlined /> 保存设置
-            </a-button>
+            <a-space>
+              <a-button type="primary" @click="handleSave" :loading="saveLoading">
+                <SaveOutlined /> 保存设置
+              </a-button>
+              <a-button @click="handleVerify" :loading="verifyLoading">
+                <ApiOutlined /> 验证连接
+              </a-button>
+            </a-space>
+          </a-form-item>
+          
+          <a-form-item v-if="verifyResult">
+            <a-alert
+              :type="verifyResult.success ? 'success' : 'error'"
+              :message="verifyResult.success ? '验证成功' : '验证失败'"
+              :description="verifyResult.message"
+              show-icon
+              closable
+              @close="verifyResult = null"
+            />
+          </a-form-item>
+          
+          <a-form-item v-if="verifyResult && verifyResult.interaction_log && verifyResult.interaction_log.length > 0">
+            <a-collapse>
+              <a-collapse-panel key="1" header="查看交互详情">
+                <div style="max-height: 400px; overflow-y: auto; background: #f5f5f5; padding: 12px; border-radius: 4px;">
+                  <div v-for="(log, index) in verifyResult.interaction_log" :key="index" style="margin-bottom: 12px;">
+                    <!-- 请求信息 -->
+                    <div v-if="log.type === 'request'" style="margin-bottom: 8px;">
+                      <div style="color: #1890ff; font-weight: bold; margin-bottom: 4px;">📤 请求信息</div>
+                      <div style="font-size: 12px; background: white; padding: 8px; border-radius: 4px;">
+                        <div><strong>端点:</strong> {{ log.endpoint }}</div>
+                        <div><strong>模型:</strong> {{ log.model }}</div>
+                        <div><strong>消息:</strong> {{ JSON.stringify(log.messages) }}</div>
+                        <div><strong>参数:</strong> max_tokens={{ log.max_tokens }}, temperature={{ log.temperature }}</div>
+                      </div>
+                    </div>
+                    
+                    <!-- 响应信息 -->
+                    <div v-else-if="log.type === 'response'" style="margin-bottom: 8px;">
+                      <div :style="{ color: log.status === 'success' ? '#52c41a' : '#ff4d4f', fontWeight: 'bold', marginBottom: '4px' }">
+                        {{ log.status === 'success' ? '📥 响应成功' : '❌ 响应失败' }}
+                      </div>
+                      <div style="font-size: 12px; background: white; padding: 8px; border-radius: 4px;">
+                        <div><strong>模型:</strong> {{ log.model }}</div>
+                        <div v-if="log.usage && log.usage.total_tokens">
+                          <strong>Token 使用:</strong> 输入={{ log.usage.prompt_tokens }}, 输出={{ log.usage.completion_tokens }}, 总计={{ log.usage.total_tokens }}
+                        </div>
+                        <div v-if="log.content"><strong>响应内容:</strong> {{ log.content }}</div>
+                        <div v-if="log.error" style="color: #ff4d4f;"><strong>错误:</strong> {{ log.error }}</div>
+                      </div>
+                    </div>
+                    
+                    <!-- 错误信息 -->
+                    <div v-else-if="log.type === 'error'" style="margin-bottom: 8px;">
+                      <div style="color: #ff4d4f; font-weight: bold; margin-bottom: 4px;">⚠️ 错误详情</div>
+                      <div style="font-size: 12px; background: white; padding: 8px; border-radius: 4px; color: #ff4d4f;">
+                        {{ log.error }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </a-collapse-panel>
+            </a-collapse>
           </a-form-item>
         </a-form>
       </a-spin>

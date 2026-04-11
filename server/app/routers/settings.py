@@ -1,13 +1,28 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
 from app.models.database import AppSettings, get_db
 from app.schemas.schemas import LLMSettingsUpdate, LLMSettingsOut
+from app.services.llm_service import verify_llm_connection
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 LLM_KEYS = ["llm_endpoint", "llm_api_key", "llm_model"]
+
+
+class LLMVerifyRequest(BaseModel):
+    llm_endpoint: str
+    llm_api_key: str
+    llm_model: str
+
+
+class LLMVerifyResponse(BaseModel):
+    success: bool
+    message: str
+    model: str = ""
+    interaction_log: list[dict] = []
 
 
 @router.get("/llm", response_model=LLMSettingsOut)
@@ -42,6 +57,22 @@ async def update_llm_settings(data: LLMSettingsUpdate, db: AsyncSession = Depend
         llm_endpoint=data.llm_endpoint,
         llm_api_key=_mask_key(data.llm_api_key),
         llm_model=data.llm_model,
+    )
+
+
+@router.post("/llm/verify", response_model=LLMVerifyResponse)
+async def verify_llm(data: LLMVerifyRequest):
+    """验证 LLM 连接是否正常"""
+    success, message, model, interaction_log = await verify_llm_connection(
+        data.llm_endpoint,
+        data.llm_api_key,
+        data.llm_model
+    )
+    return LLMVerifyResponse(
+        success=success,
+        message=message,
+        model=model,
+        interaction_log=interaction_log
     )
 
 
