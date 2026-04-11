@@ -46,6 +46,15 @@ export const testcaseApi = {
 export const generateApi = {
   generate: (projectId: string) =>
     api.post<TestCase[]>('/generate', { project_id: projectId }).then(r => r.data),
+  // MCP 页面嗅探（静态分析）
+  mcpDiscover: (projectId: string) =>
+    api.post<{ message: string; page_count: number; pages: any[] }>('/generate/mcp/discover', { project_id: projectId }).then(r => r.data),
+  // 为单个页面生成用例
+  mcpGeneratePageCases: (pageId: string) =>
+    api.post<TestCase[]>(`/generate/mcp/${pageId}/generate`).then(r => r.data),
+  // 获取组件列表
+  getComponents: (projectId: string) =>
+    api.get<{ components: any[]; page_components: any[]; common_components: any[]; framework: string; entry_points: string[] }>(`/generate/components/${projectId}`).then(r => r.data),
 }
 
 // ---- Execute ----

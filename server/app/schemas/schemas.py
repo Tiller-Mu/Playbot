@@ -136,6 +136,11 @@ class GenerateRequest(BaseModel):
     project_id: str
 
 
+class MCPGenerateRequest(BaseModel):
+    """MCP 页面用例生成请求"""
+    project_id: str
+
+
 # ---- Settings ----
 class LLMSettingsUpdate(BaseModel):
     llm_endpoint: str
