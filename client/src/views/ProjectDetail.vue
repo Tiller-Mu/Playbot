@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, h } from 'vue'
+import { ref, onMounted, computed, h, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
@@ -59,17 +59,46 @@ const pageTree = ref<TestPage[]>([])
 const selectedPageId = ref<string | null>(null)
 const treeExpandedKeys = ref<string[]>([])
 
+// MCP日志相关
+const showMCPLog = ref(false)  // 是否显示MCP日志面板
+const mcpLogs = ref<any[]>([])  // MCP日志列表
+const mcpLogWebSocket = ref<WebSocket | null>(null)  // WebSocket连接
+const mcpIsRunning = ref(false)  // MCP是否正在运行
+
+// MCP日志等级图标
+const logLevelIcons: Record<string, string> = {
+  info: '💬',
+  success: '✅',
+  warning: '⚠️',
+  error: '❌',
+  debug: '🔍'
+}
+
+// MCP日志等级颜色
+const logLevelColors: Record<string, string> = {
+  info: '#1890ff',
+  success: '#52c41a',
+  warning: '#faad14',
+  error: '#ff4d4f',
+  debug: '#8c8c8c'
+}
+
 const activeTab = computed(() => {
   if (route.name === 'Executions') return 'executions'
   return 'cases'
 })
 
 async function loadProject() {
+  console.log('[ProjectDetail] 开始加载项目, projectId:', projectId.value)
   loading.value = true
   try {
     project.value = await projectApi.get(projectId.value)
+    console.log('[ProjectDetail] 项目加载成功:', project.value?.name)
+  } catch (e) {
+    console.error('[ProjectDetail] 项目加载失败:', e)
   } finally {
     loading.value = false
+    console.log('[ProjectDetail] loading设置为false, project:', project.value?.name)
   }
 }
 
@@ -123,11 +152,14 @@ async function loadComponents() {
 
 // 建立双向关联
 function buildAssociations() {
-  // 页面 → 组件（从页面树数据中获取）
+  // 如果pageComponents已经有数据（从WebSocket收到的），直接使用
+  // 否则从页面树数据中获取
   pageTree.value.forEach(page => {
-    // 从页面的 components 字段获取（如果有）
-    const components = (page as any).components || []
-    pageComponents.value[page.id] = components
+    // pageComponents中如果有数据就使用，没有就设为空数组
+    if (!pageComponents.value[page.id]) {
+      const components = (page as any).components || []
+      pageComponents.value[page.id] = components
+    }
   })
   
   // 组件 → 页面（反向查找）
@@ -141,6 +173,9 @@ function buildAssociations() {
     })
     componentPages.value[comp.name] = usedInPages
   })
+  
+  console.log('[关联] pageComponents:', pageComponents.value)
+  console.log('[关联] componentPages:', componentPages.value)
 }
 
 // 显示关联信息面板
@@ -235,45 +270,132 @@ async function handleClone() {
   }
 }
 
+// WebSocket日志连接
+function connectMCPLogWebSocket(): Promise<void> {
+  return new Promise((resolve) => {
+    if (mcpLogWebSocket.value) {
+      mcpLogWebSocket.value.close()
+    }
+    
+    // WebSocket应该连接到后端端口8001，而不是前端端口5173
+    const wsUrl = `ws://localhost:8001/ws/mcp/${projectId.value}`
+    console.log('连接MCP日志WebSocket:', wsUrl)
+    const ws = new WebSocket(wsUrl)
+    
+    ws.onopen = () => {
+      console.log('MCP日志WebSocket已连接')
+      resolve()  // 连接建立后通知
+    }
+    
+    ws.onmessage = (event) => {
+      console.log('[WebSocket收到消息]', event.data)
+      try {
+        const logEntry = JSON.parse(event.data)
+        console.log('[WebSocket解析后]', logEntry)
+        mcpLogs.value.push({
+          ...logEntry,
+          id: Date.now() + Math.random()
+        })
+          
+        // 从日志中提取组件关联信息
+        if (logEntry.data?.components && logEntry.data?.route) {
+          const route = logEntry.data.route
+          const components = logEntry.data.components
+          // 找到对应的页面
+          const page = pageTree.value.find(p => p.full_path === route || p.path === route)
+          if (page) {
+            pageComponents.value[page.id] = components
+            // 同时更新componentPages（组件→页面反向映射）
+            components.forEach((compName: string) => {
+              if (!componentPages.value[compName]) {
+                componentPages.value[compName] = []
+              }
+              if (!componentPages.value[compName].includes(page.name || route)) {
+                componentPages.value[compName].push(page.name || route)
+              }
+            })
+          }
+        }
+          
+        // 自动滚动到底部
+        nextTick(() => {
+          const logContainer = document.querySelector('.mcp-log-content')
+          if (logContainer) {
+            logContainer.scrollTop = logContainer.scrollHeight
+          }
+        })
+      } catch (e) {
+        console.error('解析MCP日志失败:', e)
+      }
+    }
+    
+    ws.onerror = (error) => {
+      console.error('MCP日志WebSocket错误:', error)
+    }
+    
+    ws.onclose = () => {
+      console.log('MCP日志WebSocket已断开')
+    }
+    
+    mcpLogWebSocket.value = ws
+  })
+}
+
+function disconnectMCPLogWebSocket() {
+  if (mcpLogWebSocket.value) {
+    mcpLogWebSocket.value.close()
+    mcpLogWebSocket.value = null
+  }
+}
+
+function clearMCPLogs() {
+  mcpLogs.value = []
+}
+
 async function handleMCPDiscover() {
   if (!project.value?.repo_path) {
     message.warning('请先拉取代码')
     return
   }
   
+  // 清空之前的日志
+  clearMCPLogs()
+  // 标记为正在运行
+  mcpIsRunning.value = true
+  
+  // 先建立WebSocket连接
+  showMCPLog.value = true  // 打开面板
+  await connectMCPLogWebSocket()  // 等待连接建立
+  console.log('WebSocket连接已建立，开始调用API...')
+  
   console.log('=== MCP 嗅探调试信息 ===')
   console.log('Project ID:', projectId.value)
   console.log('Repo Path:', project.value.repo_path)
   console.log('Base URL:', project.value.base_url)
   
-  Modal.confirm({
-    title: 'MCP 页面嗅探',
-    content: h('div', [
-      h('p', 'MCP 将通过静态代码分析发现所有页面。'),
-      h('p', { style: 'color: #faad14; font-size: 12px; margin-top: 8px;' }, 
-        '嗅探完成后，您可以逐个页面生成测试用例。'
-      ),
-    ]),
-    okText: '开始嗅探',
-    cancelText: '取消',
-    onOk: async () => {
-      mcpDiscoverLoading.value = true
-      try {
-        console.log('开始调用 MCP 嗅探 API...')
-        const result = await generateApi.mcpDiscover(projectId.value)
-        console.log('MCP 嗅探结果:', result)
-        message.success(result.message || `MCP 嗅探完成，发现 ${result.page_count} 个页面`)
-        // 刷新页面树
-        await loadPageTree()
-      } catch (e: any) {
-        console.error('MCP 嗅探失败:', e)
-        const errorMsg = e.response?.data?.detail || e.message || 'MCP 嗅探失败'
-        message.error(errorMsg)
-      } finally {
-        mcpDiscoverLoading.value = false
-      }
-    },
-  })
+  // 直接开始分析，不再弹出确认对话框（日志面板已经打开）
+  mcpDiscoverLoading.value = true
+  try {
+    console.log('开始调用 MCP 嗅探 API...')
+    const result = await generateApi.mcpDiscover(projectId.value)
+    console.log('MCP 嗅探结果:', result)
+    message.success(result.message || `MCP 嗅探完成，发现 ${result.page_count} 个页面`)
+    
+    // 刷新页面树
+    await loadPageTree()
+    
+    // 自动加载组件列表，建立双向关联
+    if (project.value?.repo_path) {
+      await loadComponents()
+    }
+  } catch (e: any) {
+    console.error('MCP 嗅探失败:', e)
+    const errorMsg = e.response?.data?.detail || e.message || 'MCP 嗅探失败'
+    message.error(errorMsg)
+  } finally {
+    mcpDiscoverLoading.value = false
+    mcpIsRunning.value = false
+  }
 }
 
 async function handleGeneratePageCases(pageId: string, pagePath: string) {
@@ -336,7 +458,25 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div>
+  <div style="position: relative;">
+    <!-- 右侧MCP日志浮动按钮 - 只要有日志或正在运行就一直显示 -->
+    <div 
+      v-if="mcpLogs.length > 0 || mcpIsRunning || showMCPLog"
+      style="position: fixed; right: 16px; top: 50%; transform: translateY(-50%); z-index: 1000;"
+    >
+      <a-badge :count="mcpLogs.length" :overflow-count="99" :number-style="{ backgroundColor: mcpIsRunning ? '#1890ff' : '#52c41a' }">
+        <a-button 
+          type="primary" 
+          shape="circle" 
+          size="large"
+          @click="showMCPLog = !showMCPLog"
+          :icon="h(RobotOutlined)"
+          :loading="mcpIsRunning"
+          style="box-shadow: 0 4px 12px rgba(0,0,0,0.15);"
+        />
+      </a-badge>
+    </div>
+    
     <a-page-header
       :title="project?.name || '加载中...'"
       :sub-title="project?.base_url"
@@ -539,5 +679,40 @@ onMounted(async () => {
         </div>
       </a-card>
     </div>
+    
+    <!-- MCP实时日志面板 - 右侧展开 -->
+    <a-drawer
+      v-model:open="showMCPLog"
+      title="🤖 MCP 分析日志"
+      placement="right"
+      :width="500"
+      :closable="true"
+      @close="disconnectMCPLogWebSocket"
+    >
+      <template #extra>
+        <a-space>
+          <a-button size="small" @click="clearMCPLogs">清空日志</a-button>
+          <a-tag>{{ mcpLogs.length }} 条日志</a-tag>
+        </a-space>
+      </template>
+      
+      <div class="mcp-log-content" style="height: calc(100vh - 120px); overflow-y: auto; font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px;">
+        <div v-if="mcpLogs.length === 0" style="color: #666; text-align: center; padding: 40px;">
+          等待日志输出...
+        </div>
+        <div 
+          v-for="log in mcpLogs" 
+          :key="log.id"
+          style="margin-bottom: 6px; line-height: 1.5;"
+        >
+          <span style="color: #888;">{{ log.timestamp?.split('T')[1]?.split('.')[0] || '' }}</span>
+          <span style="margin: 0 6px;">{{ logLevelIcons[log.level] || '📝' }}</span>
+          <span :style="{ color: logLevelColors[log.level] || '#d4d4d4' }">{{ log.message }}</span>
+          <div v-if="log.data" style="margin-left: 80px; color: #6a9955; font-size: 11px;">
+            {{ JSON.stringify(log.data, null, 2) }}
+          </div>
+        </div>
+      </div>
+    </a-drawer>
   </div>
 </template>

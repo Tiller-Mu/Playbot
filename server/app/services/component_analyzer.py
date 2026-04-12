@@ -1,17 +1,29 @@
 """组件分析引擎 - 分析项目源码，提取组件列表和关系。"""
 import os
 import re
+import logging
 from pathlib import Path
 import asyncio
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 async def analyze_components(repo_path: str) -> dict[str, Any]:
     """
-    分析 Web 项目源码，提取所有组件信息
+    分析 Web 项目源码，提取所有组件文件清单
+    
+    优化说明：
+    - 静态扫描只输出组件文件清单（防止MCP遗漏）
+    - 不再进行复杂的组件使用关系判断
+    - 由MCP按需分析每个页面的组件引用关系
+    
     返回: {
         "framework": "Vue",
-        "components": [...],
+        "components": [
+            {"name": "UserForm", "file_path": "src/components/UserForm.vue", "type": "component"},
+            {"name": "LoginPage", "file_path": "src/views/LoginPage.vue", "type": "page", "route": "/login"}
+        ],
         "page_components": [...],
         "common_components": [...],
         "entry_points": ["/login", "/dashboard"]
@@ -138,12 +150,17 @@ def _extract_component_info(
     comp_type: str,
     framework: str
 ) -> dict | None:
-    """提取组件信息"""
+    """
+    提取组件基本信息（简化版）
+    
+    只输出：组件名称、文件路径、类型、路由（仅page）
+    不再提取imports，由MCP按需分析
+    """
     try:
-        content = file_path.read_text(errors="ignore")
         rel_path = str(file_path.relative_to(repo))
         
-        # 提取组件名称
+        # 读取文件内容仅用于提取组件名称
+        content = file_path.read_text(errors="ignore")
         component_name = _extract_component_name(content, file_path)
         
         # 提取路由（仅页面组件）
@@ -151,17 +168,14 @@ def _extract_component_info(
         if comp_type == "page":
             route = _extract_route(file_path, repo, framework)
         
-        # 提取 import 的组件
-        imports = _extract_imports(content, framework)
-        
         return {
             "type": comp_type,
             "name": component_name,
             "file_path": rel_path,
             "route": route,
-            "imports": imports,
         }
     except Exception as e:
+        logger.warning(f"提取组件信息失败 {file_path}: {e}")
         return None
 
 

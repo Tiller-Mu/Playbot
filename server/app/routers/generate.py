@@ -11,7 +11,9 @@ from app.services.analyzer import analyze_project
 from app.services.component_analyzer import analyze_components
 from app.services.mcp_explorer import MCPPageExplorer
 from app.services.mcp_rules import MCPRulesLoader
+from app.services.mcp_log_service import mcp_log_service
 from app.core.config import settings
+from app.core.websocket import ws_manager
 
 router = APIRouter(prefix="/api/generate", tags=["generate"])
 
@@ -123,13 +125,16 @@ async def generate_testcases(data: GenerateRequest, db: AsyncSession = Depends(g
 @router.post("/mcp/discover", response_model=dict)
 async def mcp_discover_pages(data: MCPGenerateRequest, db: AsyncSession = Depends(get_db)):
     """
-    MCP 页面嗅探 - 通过静态代码分析发现页面
+    MCP 页面嗅探 - 通过LLM分析每个页面的组件引用关系
     
     流程：
-    1. 静态分析发现组件
-    2. 分析页面代码结构
+    1. 静态分析发现组件（输出组件清单）
+    2. 逐页面LLM分析（独立会话，防遗漏）
     3. 将页面写入页面树
+    4. 通过WebSocket实时推送日志
     """
+    print(f"[MCP-API] mcp_discover_pages 被调用, project_id={data.project_id}", flush=True)
+    
     project = await db.get(Project, data.project_id)
     if not project:
         raise HTTPException(404, "项目不存在")
@@ -138,41 +143,96 @@ async def mcp_discover_pages(data: MCPGenerateRequest, db: AsyncSession = Depend
     if not project.base_url:
         raise HTTPException(400, "请先配置项目 base_url")
 
-    try:
-        # Step 1: 静态组件分析
-        logger.info(f"开始静态组件分析: {project.repo_path}")
-        components_info = await analyze_components(project.repo_path)
-        logger.debug(f"组件分析结果: {components_info}")
-        logger.info(f"组件分析完成，发现 {len(components_info.get('components', []))} 个组件")
-        logger.info(f"入口点列表: {components_info.get('entry_points', [])}")
+    # 获取project_id用于WebSocket频道
+    project_id = data.project_id
+    
+    async def send_log(level: str, message: str, log_data: dict = None):
+        """异步发送WebSocket日志"""
+        log_entry = {
+            "type": "log",
+            "level": level,
+            "message": message,
+            "timestamp": __import__('datetime').datetime.now().isoformat(),
+            "data": log_data
+        }
+        # 发送到对应的WebSocket频道
+        print(f"[MCP-LOG] Broadcasting to mcp_{project_id}: {message[:50]}...", flush=True)
+        await ws_manager.broadcast(log_entry, channel=f"mcp_{project_id}")
+        # 同时记录到日志服务
+        mcp_log_service.log(project_id, level, message, log_data)
 
-        # Step 2: MCP 静态分析页面
-        logger.info(f"开始 MCP 页面分析: {project.base_url}")
-        explorer = MCPPageExplorer()
+    try:
+        # 开始会话
+        await send_log("info", f"🚀 开始MCP页面分析，项目: {project.name}")
+        await send_log("info", f"📂 项目路径: {project.repo_path}")
+        await send_log("info", f"🌐 Base URL: {project.base_url}")
+        
+        # Step 1: 静态组件分析
+        await send_log("info", f"📊 Step 1/3: 开始静态组件分析...")
+        components_info = await analyze_components(project.repo_path)
+        
+        component_count = len(components_info.get('components', []))
+        page_count = len(components_info.get('page_components', []))
+        common_count = len(components_info.get('common_components', []))
+        
+        await send_log("success", 
+            f"✓ 静态分析完成: 共 {component_count} 个组件 "
+            f"({page_count} 个页面组件, {common_count} 个普通组件)",
+            {
+                "framework": components_info.get('framework', '未知'),
+                "entry_points": components_info.get('entry_points', [])
+            }
+        )
+
+        # Step 2: MCP 页面分析（使用LLM逐页面分析）
+        await send_log("info", f"🤖 Step 2/3: 开始MCP页面分析（LLM）...")
+        await send_log("info", f"📄 共 {len(components_info.get('page_components', []))} 个页面待分析")
+        
+        # 创建WebSocket日志回调函数（必须是async函数）
+        async def ws_log(level: str, message: str, data=None):
+            log_entry = {
+                "type": "log",
+                "level": level,
+                "message": message,
+                "timestamp": __import__('datetime').datetime.now().isoformat(),
+                "data": data
+            }
+            await ws_manager.broadcast(log_entry, channel=f"mcp_{project_id}")
+            mcp_log_service.log(project_id, level, message, data)
+        
+        explorer = MCPPageExplorer(
+            repo_path=project.repo_path,
+            project_id=project_id,
+            log_callback=ws_log  # 传递异步日志回调
+        )
         
         # 加载全局规则
-        rules_loader = MCPRulesLoader(project_id=project.id)
+        rules_loader = MCPRulesLoader(project_id=data.project_id)
         global_rules = rules_loader.load_global_rules() or ""
+        if global_rules:
+            await send_log("info", "📋 已加载全局规则")
         
         discovered_pages = await explorer.discover_pages(
             base_url=project.base_url,
             entry_points=components_info.get("entry_points", ["/"]),
             components_info=components_info,
-            global_rules=global_rules
+            global_rules=global_rules,
+            concurrent=False  # 串行分析，便于调试
         )
-        logger.info(f"MCP 探索完成，发现 {len(discovered_pages)} 个页面")
-        logger.debug(f"页面详情: {discovered_pages}")
+        
+        await send_log("success", f"✓ MCP分析完成，发现 {len(discovered_pages)} 个页面")
 
         # Step 3: 将页面写入页面树数据库
-        logger.info("将页面写入页面树数据库...")
+        await send_log("info", f"💾 Step 3/3: 写入页面树数据库...")
         created_pages = []
+        
         for page_info in discovered_pages:
             route = page_info["route"]
             
             # 检查页面是否已存在
             existing_page = await db.execute(
                 select(TestPage).where(
-                    TestPage.project_id == project.id,
+                    TestPage.project_id == data.project_id,
                     TestPage.full_path == route
                 )
             )
@@ -183,10 +243,11 @@ async def mcp_discover_pages(data: MCPGenerateRequest, db: AsyncSession = Depend
                 existing_page.name = page_info.get("title", route)
                 existing_page.component_name = json.dumps(page_info.get("detected_components", []), ensure_ascii=False)
                 created_pages.append(existing_page)
+                await send_log("info", f"📝 更新页面: {route} ({len(page_info.get('detected_components', []))} 个组件)")
             else:
                 # 创建新页面
                 test_page = TestPage(
-                    project_id=project.id,
+                    project_id=data.project_id,
                     name=page_info.get("title", route),
                     path=route,
                     full_path=route,
@@ -195,12 +256,18 @@ async def mcp_discover_pages(data: MCPGenerateRequest, db: AsyncSession = Depend
                 )
                 db.add(test_page)
                 created_pages.append(test_page)
+                await send_log("success", f"✨ 新增页面: {route} ({len(page_info.get('detected_components', []))} 个组件)")
         
         await db.commit()
         for page in created_pages:
             await db.refresh(page)
         
-        logger.info(f"页面树更新完成，共 {len(created_pages)} 个页面")
+        await send_log("success", f"🎉 MCP页面分析完成！共 {len(created_pages)} 个页面已保存",
+            {
+                "total_pages": len(created_pages),
+                "total_components": component_count
+            }
+        )
         
         return {
             "message": f"MCP 嗅探完成，发现 {len(discovered_pages)} 个页面",
@@ -214,6 +281,7 @@ async def mcp_discover_pages(data: MCPGenerateRequest, db: AsyncSession = Depend
         }
     
     except HTTPException:
+        await send_log("error", "MCP分析失败: 项目不存在或配置不完整")
         raise
     except Exception as e:
         logger.error(f"MCP 页面嗅探失败: {e}", exc_info=True)
