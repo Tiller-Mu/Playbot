@@ -8,6 +8,7 @@ import {
   DeleteOutlined,
   PlusOutlined,
   ThunderboltOutlined,
+  RobotOutlined,
 } from '@ant-design/icons-vue'
 import type { TestCase } from '../types'
 import { testcaseApi, executeApi, pageApi } from '../services/api'
@@ -23,6 +24,7 @@ const searchText = ref('')
 const selectedIds = ref<string[]>([])
 const executing = ref(false)
 const generating = ref(false)
+const mcpGenerating = ref(false)
 
 // New case modal
 const showNewModal = ref(false)
@@ -71,6 +73,25 @@ async function handleGenerateCases() {
     message.error(e.response?.data?.detail || '用例生成失败')
   } finally {
     generating.value = false
+  }
+}
+
+// MCP生成用例
+async function handleMCPGenerate() {
+  if (!pageId.value) {
+    message.warning('请先在左侧选择一个页面')
+    return
+  }
+  
+  mcpGenerating.value = true
+  try {
+    const newCases = await pageApi.mcpGenerateCases(pageId.value)
+    message.success(`MCP成功生成 ${newCases.length} 条测试用例`)
+    await loadCases()
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || 'MCP用例生成失败')
+  } finally {
+    mcpGenerating.value = false
   }
 }
 
@@ -178,11 +199,18 @@ onMounted(loadCases)
       <a-space>
         <a-button 
           type="primary" 
+          @click="handleMCPGenerate" 
+          :loading="mcpGenerating"
+          :disabled="!pageId"
+        >
+          <RobotOutlined /> MCP生成用例
+        </a-button>
+        <a-button 
           @click="handleGenerateCases" 
           :loading="generating"
           :disabled="!pageId"
         >
-          <ThunderboltOutlined /> 生成用例
+          <ThunderboltOutlined /> 传统生成
         </a-button>
         <a-button @click="showNewModal = true"><PlusOutlined /> 新增用例</a-button>
         <a-button type="primary" @click="handleRunSelected" :loading="executing">

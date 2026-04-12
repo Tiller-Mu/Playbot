@@ -1,18 +1,15 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, h, nextTick } from 'vue'
+import { ref, onMounted, onUnmounted, computed, h, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { message, Modal } from 'ant-design-vue'
 import {
   CloudDownloadOutlined,
-  ThunderboltOutlined,
   HistoryOutlined,
   FileTextOutlined,
-  ReloadOutlined,
   LeftOutlined,
   RightOutlined,
   FileOutlined,
   RobotOutlined,
-  PlusOutlined,
 } from '@ant-design/icons-vue'
 import type { Project, TestPage } from '../types'
 import { projectApi, pageApi, generateApi } from '../services/api'
@@ -23,8 +20,6 @@ const projectId = computed(() => route.params.id as string)
 const project = ref<Project | null>(null)
 const loading = ref(false)
 const cloneLoading = ref(false)
-const generateLoading = ref(false)
-const mcpGenerateLoading = ref(false)
 const mcpDiscoverLoading = ref(false)  // MCP 嗅探加载状态
 const treeLoading = ref(false)
 const pageGenerating = ref<Record<string, boolean>>({})  // 记录每个页面的生成状态
@@ -47,17 +42,20 @@ const associationPanel = ref<{
   title: string
   type: 'page' | 'component'
   items: string[]
+  description?: string  // 页面描述
 }>({
   visible: false,
   title: '',
   type: 'page',
-  items: []
+  items: [],
+  description: ''
 })
 
 // 页面树相关
 const pageTree = ref<TestPage[]>([])
 const selectedPageId = ref<string | null>(null)
 const treeExpandedKeys = ref<string[]>([])
+const analyzingPages = ref<Record<string, boolean>>({})  // 记录每个页面的分析状态
 
 // MCP日志相关
 const showMCPLog = ref(false)  // 是否显示MCP日志面板
@@ -179,35 +177,84 @@ function buildAssociations() {
 }
 
 // 显示关联信息面板
-function showAssociationPanel(title: string, type: 'page' | 'component', items: string[]) {
+function showAssociationPanel(title: string, type: 'page' | 'component', items: string[], description?: string) {
   associationPanel.value = {
     visible: true,
     title,
     type,
-    items
+    items,
+    description: description || ''
   }
 }
 
 // 页面节点选择
 function onPageSelect(selectedKeys: string[], info: any) {
+  console.log('[onPageSelect] 被调用, selectedKeys:', selectedKeys)
+  console.log('[onPageSelect] info.node:', info?.node)
+  console.log('[onPageSelect] info.node.key:', info?.node?.key)
+  
+  // 递归查找页面
+  function findPageInTree(pages: any[], pageId: string): any {
+    for (const page of pages) {
+      if (page.id === pageId) {
+        return page
+      }
+      if (page.children && page.children.length > 0) {
+        const found = findPageInTree(page.children, pageId)
+        if (found) return found
+      }
+    }
+    return null
+  }
+  
+  // 尝试从 info 中获取节点信息
+  const node = info?.node
+  if (node) {
+    const pageId = node.key
+    const page = findPageInTree(pageTree.value, pageId)
+    
+    console.log('[onPageSelect] 从info找到的页面:', page)
+    console.log('[onPageSelect] 页面的description:', page.description)
+    console.log('[onPageSelect] 页面完整数据:', JSON.stringify(page, null, 2))
+    
+    if (page) {
+      selectedNodeId.value = pageId
+      const components = pageComponents.value[pageId] || []
+      console.log('[onPageSelect] 组件列表:', components)
+      console.log('[onPageSelect] 页面描述:', page.description)
+      
+      showAssociationPanel(
+        `页面: ${page.name || page.path}`,
+        'page',
+        components,
+        page.description  // 传入description
+      )
+      
+      console.log('[onPageSelect] 面板状态:', associationPanel.value)
+      return
+    }
+  }
+  
+  // 备用方案：从 selectedKeys 获取
   if (selectedKeys.length > 0) {
     const pageId = selectedKeys[0]
     selectedNodeId.value = pageId
-    const page = pageTree.value.find(p => p.id === pageId)
+    const page = findPageInTree(pageTree.value, pageId)
     
     if (page) {
       const components = pageComponents.value[pageId] || []
       showAssociationPanel(
         `页面: ${page.name || page.path}`,
         'page',
-        components
+        components,
+        page.description
       )
     }
   }
 }
 
 // 组件节点选择
-function onComponentSelect(selectedKeys: string[], info: any) {
+function onComponentSelect(selectedKeys: string[], _info: any) {
   if (selectedKeys.length > 0) {
     const componentName = selectedKeys[0]
     selectedNodeId.value = componentName
@@ -237,6 +284,41 @@ async function handleRefreshTree() {
     message.error(e.response?.data?.detail || '刷新页面树失败')
   } finally {
     treeLoading.value = false
+  }
+}
+
+// 单页 LLM 分析
+async function handleAnalyzePage(pageId: string) {
+  if (analyzingPages.value[pageId]) return
+  
+  analyzingPages.value[pageId] = true
+  showMCPLog.value = true  // 自动展开日志面板
+  
+  // 确保 WebSocket 已连接
+  console.log('[handleAnalyzePage] WebSocket状态:', mcpLogWebSocket.value?.readyState)
+  if (!mcpLogWebSocket.value || mcpLogWebSocket.value.readyState !== WebSocket.OPEN) {
+    console.log('[handleAnalyzePage] 重新连接WebSocket...')
+    try {
+      await connectMCPLogWebSocket()
+      console.log('[handleAnalyzePage] WebSocket已连接')
+    } catch (e) {
+      console.error('[handleAnalyzePage] WebSocket连接失败:', e)
+    }
+  } else {
+    console.log('[handleAnalyzePage] WebSocket已连接，直接使用')
+  }
+  
+  try {
+    const result = await generateApi.analyzePage(pageId)
+    
+    message.success('页面分析完成')
+    
+    // 刷新页面树以显示新的描述
+    await loadPageTree()
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || '页面分析失败')
+  } finally {
+    analyzingPages.value[pageId] = false
   }
 }
 
@@ -271,19 +353,26 @@ async function handleClone() {
 }
 
 // WebSocket日志连接
+let reconnectAttempts = 0
+const MAX_RECONNECT_ATTEMPTS = 3
+
 function connectMCPLogWebSocket(): Promise<void> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     if (mcpLogWebSocket.value) {
       mcpLogWebSocket.value.close()
     }
     
     // WebSocket应该连接到后端端口8001，而不是前端端口5173
-    const wsUrl = `ws://localhost:8001/ws/mcp/${projectId.value}`
+    // 使用当前API地址的端口
+    const apiBaseURL = 'http://localhost:8003/api'
+    const wsPort = apiBaseURL.match(/:(\d+)/)?.[1] || '8003'
+    const wsUrl = `ws://localhost:${wsPort}/ws/mcp/${projectId.value}`
     console.log('连接MCP日志WebSocket:', wsUrl)
     const ws = new WebSocket(wsUrl)
     
     ws.onopen = () => {
       console.log('MCP日志WebSocket已连接')
+      reconnectAttempts = 0  // 重置重连计数
       resolve()  // 连接建立后通知
     }
     
@@ -335,6 +424,18 @@ function connectMCPLogWebSocket(): Promise<void> {
     
     ws.onclose = () => {
       console.log('MCP日志WebSocket已断开')
+      mcpLogWebSocket.value = null
+      
+      // 自动重连（如果正在运行且未达到最大重连次数）
+      if (mcpIsRunning.value && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        reconnectAttempts++
+        console.log(`WebSocket断开，${3}秒后尝试第${reconnectAttempts}次重连...`)
+        setTimeout(() => {
+          connectMCPLogWebSocket().catch(() => {
+            console.log('WebSocket重连失败')
+          })
+        }, 3000)
+      }
     }
     
     mcpLogWebSocket.value = ws
@@ -398,22 +499,6 @@ async function handleMCPDiscover() {
   }
 }
 
-async function handleGeneratePageCases(pageId: string, pagePath: string) {
-  pageGenerating.value[pageId] = true
-  try {
-    const cases = await generateApi.mcpGeneratePageCases(pageId)
-    message.success(`页面 ${pagePath} 生成 ${cases.length} 个测试用例`)
-    // 刷新用例列表
-    router.push({ name: 'TestCases', params: { id: projectId.value } })
-    // 刷新页面树（更新用例数量）
-    await loadPageTree()
-  } catch (e: any) {
-    message.error(e.response?.data?.detail || '生成用例失败')
-  } finally {
-    pageGenerating.value[pageId] = false
-  }
-}
-
 function handlePageSelect(pageId: string, page: TestPage) {
   if (page.is_leaf) {
     selectedPageId.value = pageId
@@ -441,7 +526,8 @@ function switchTab(key: string) {
 function convertToTreeData(pages: TestPage[]): any[] {
   return pages.map(page => ({
     key: page.id,
-    title: page.name + (page.is_leaf ? '' : ` (${page.case_count || 0})`),
+    title: page.name,
+    description: page.description || '',  // 保留description供面板使用
     icon: page.is_leaf ? FileOutlined : RightOutlined,
     children: page.children ? convertToTreeData(page.children) : [],
     isLeaf: page.is_leaf,
@@ -455,13 +541,17 @@ onMounted(async () => {
     await loadPageTree()
   }
 })
+
+onUnmounted(() => {
+  disconnectMCPLogWebSocket()
+})
 </script>
 
 <template>
   <div style="position: relative;">
-    <!-- 右侧MCP日志浮动按钮 - 只要有日志或正在运行就一直显示 -->
+    <!-- 右侧MCP日志浮动按钮 - 只要有日志历史或正在运行就显示 -->
     <div 
-      v-if="mcpLogs.length > 0 || mcpIsRunning || showMCPLog"
+      v-if="mcpLogs.length > 0 || mcpIsRunning"
       style="position: fixed; right: 16px; top: 50%; transform: translateY(-50%); z-index: 1000;"
     >
       <a-badge :count="mcpLogs.length" :overflow-count="99" :number-style="{ backgroundColor: mcpIsRunning ? '#1890ff' : '#52c41a' }">
@@ -471,7 +561,6 @@ onMounted(async () => {
           size="large"
           @click="showMCPLog = !showMCPLog"
           :icon="h(RobotOutlined)"
-          :loading="mcpIsRunning"
           style="box-shadow: 0 4px 12px rgba(0,0,0,0.15);"
         />
       </a-badge>
@@ -543,23 +632,10 @@ onMounted(async () => {
               <a-radio-button value="pages">页面</a-radio-button>
               <a-radio-button value="components">组件</a-radio-button>
             </a-radio-group>
-            
-            <a-button 
-              type="text" 
-              size="small" 
-              @click="handleRefreshTree" 
-              :loading="treeLoading"
-              title="刷新页面树"
-            >
-              <ReloadOutlined />
-            </a-button>
           </a-space>
         </template>
         
-        <!-- 页面树操作提示 -->
-        <div style="padding: 8px 12px; border-bottom: 1px solid #f0f0f0; font-size: 12px; color: #666;">
-          💡 点击页面右侧的 + 按钮可为该页面生成测试用例
-        </div>
+
         
         <!-- 页面树模式 -->
         <div v-if="treeViewMode === 'pages'">
@@ -579,21 +655,21 @@ onMounted(async () => {
             <template #title="{ dataRef }">
               <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                 <span>{{ dataRef.title }}</span>
-                <a-space>
-                  <a-tag size="small" color="blue">
-                    {{ pageComponents[dataRef.key]?.length || 0 }} 个组件
+                <div style="display: flex; gap: 4px;">
+                  <a-tag size="small" :color="dataRef.isLeaf ? 'blue' : 'green'">
+                    {{ dataRef.isLeaf ? `${pageComponents[dataRef.key]?.length || 0} 个组件` : '文件夹' }}
                   </a-tag>
-                  <a-button
+                  <a-button 
                     v-if="dataRef.isLeaf"
-                    type="text"
-                    size="small"
-                    @click.stop="handleGeneratePageCases(dataRef.key, dataRef.title)"
-                    :loading="pageGenerating[dataRef.key]"
-                    :icon="h(PlusOutlined)"
-                    title="为此页面生成用例"
-                    style="padding: 2px 4px; font-size: 12px;"
-                  />
-                </a-space>
+                    size="small" 
+                    type="link" 
+                    :loading="analyzingPages[dataRef.key]"
+                    @click.stop="handleAnalyzePage(dataRef.key)"
+                    style="padding: 0 4px;"
+                  >
+                    🔍
+                  </a-button>
+                </div>
               </div>
             </template>
           </a-tree>
@@ -633,7 +709,7 @@ onMounted(async () => {
         v-if="associationPanel.visible" 
         :title="associationPanel.title" 
         :bordered="true" 
-        style="width: 250px; flex-shrink: 0;"
+        style="width: 350px; flex-shrink: 0;"
         :bodyStyle="{ padding: '12px' }"
         :closable="true"
         @close="associationPanel.visible = false"
@@ -648,10 +724,27 @@ onMounted(async () => {
             关闭
           </a-button>
         </template>
+        
+        <!-- 页面描述 -->
+        <div v-if="associationPanel.type === 'page'" 
+             style="margin-bottom: 16px; padding: 12px; background: #f5f5f5; border-radius: 4px;">
+          <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">📝 页面描述</div>
+          <div v-if="associationPanel.description" style="color: #333; line-height: 1.6; font-size: 14px;">
+            {{ associationPanel.description }}
+          </div>
+          <div v-else style="color: #999; font-size: 13px; font-style: italic;">
+            暂无描述，点击右侧 🔍 按钮进行页面分析
+          </div>
+        </div>
+        
+        <!-- 关联列表 -->
+        <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">
+          {{ associationPanel.type === 'page' ? '🧩 使用的组件' : '📄 使用的页面' }}
+        </div>
         <a-list 
           :data-source="associationPanel.items" 
           size="small"
-          :locale="{ emptyText: '暂无关联' }"
+          :locale="{ emptyText: associationPanel.type === 'page' ? '暂无组件关联，请先进行页面分析' : '暂无页面使用此组件' }"
         >
           <template #renderItem="{ item }">
             <a-list-item>
@@ -687,7 +780,6 @@ onMounted(async () => {
       placement="right"
       :width="500"
       :closable="true"
-      @close="disconnectMCPLogWebSocket"
     >
       <template #extra>
         <a-space>

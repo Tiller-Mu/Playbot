@@ -21,6 +21,11 @@ const form = ref({
   base_url: '',
 })
 
+// 分支列表相关
+const branches = ref<string[]>([])
+const loadingBranches = ref(false)
+const isEditMode = ref(false) // 标记是新建还是编辑模式
+
 async function loadProjects() {
   loading.value = true
   try {
@@ -28,6 +33,40 @@ async function loadProjects() {
   } finally {
     loading.value = false
   }
+}
+
+// 加载远程分支列表（仅编辑模式）
+async function loadBranches(projectId: string) {
+  loadingBranches.value = true
+  try {
+    const result = await projectApi.getBranches(projectId)
+    branches.value = result.branches
+    if (branches.value.length > 0 && !branches.value.includes(form.value.branch)) {
+      // 如果当前选择的分支不在列表中，选择第一个
+      form.value.branch = branches.value[0]
+    }
+  } catch (e: any) {
+    console.error('加载分支失败:', e)
+    message.warning('加载分支列表失败，请手动输入')
+    branches.value = []
+  } finally {
+    loadingBranches.value = false
+  }
+}
+
+function handleEdit(project: Project) {
+  editingProject.value = project
+  isEditMode.value = true
+  form.value = {
+    name: project.name,
+    git_url: project.git_url,
+    branch: project.branch || 'main',
+    base_url: project.base_url,
+  }
+  branches.value = [] // 清空之前的分支列表
+  showEditModal.value = true
+  // 异步加载分支列表
+  loadBranches(project.id)
 }
 
 async function handleCreate() {
@@ -59,17 +98,6 @@ async function handleDelete(id: string) {
     message.error(`删除失败: ${errorMsg}`)
     console.error('删除项目错误:', e)
   }
-}
-
-function handleEdit(project: Project) {
-  editingProject.value = project
-  form.value = {
-    name: project.name,
-    git_url: project.git_url,
-    branch: project.branch || 'main',
-    base_url: project.base_url,
-  }
-  showEditModal.value = true
 }
 
 async function handleSaveEdit() {
@@ -162,7 +190,20 @@ onMounted(loadProjects)
           <a-input v-model:value="form.git_url" placeholder="https://github.com/user/repo.git" />
         </a-form-item>
         <a-form-item label="分支">
-          <a-input v-model:value="form.branch" placeholder="main 或 master" />
+          <a-select 
+            v-model:value="form.branch" 
+            placeholder="选择分支"
+            :loading="loadingBranches"
+            show-search
+            allow-clear
+          >
+            <a-select-option v-for="branch in branches" :key="branch" :value="branch">
+              {{ branch }}
+            </a-select-option>
+          </a-select>
+          <div v-if="branches.length === 0 && !loadingBranches" style="color: #999; font-size: 12px; margin-top: 4px;">
+            未检测到远程分支，请手动输入
+          </div>
         </a-form-item>
         <a-form-item label="被测站点 URL" required>
           <a-input v-model:value="form.base_url" placeholder="https://example.com" />

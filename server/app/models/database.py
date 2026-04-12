@@ -50,7 +50,8 @@ class TestPage(Base):
     path = Column(String(500), nullable=False, comment="路径片段")
     full_path = Column(String(1000), nullable=False, comment="完整路径")
     is_leaf = Column(Boolean, default=False, comment="是否叶子节点（页面）")
-    component_name = Column(String(200), comment="组件名称")
+    component_name = Column(Text, comment="组件名称列表（JSON格式）")
+    description = Column(Text, comment="页面功能描述（Markdown格式）")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     project = relationship("Project", back_populates="pages")

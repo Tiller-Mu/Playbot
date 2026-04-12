@@ -1,11 +1,15 @@
 from openai import AsyncOpenAI
 import logging
+import asyncio
 
 from app.core.config import settings
 from app.models.database import async_session, AppSettings
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
+
+# LLM调用超时时间（秒）
+LLM_TIMEOUT = 30
 
 
 async def _get_llm_config() -> dict:
@@ -24,7 +28,12 @@ async def _get_llm_config() -> dict:
 async def get_llm_client() -> tuple[AsyncOpenAI, str]:
     """Return an OpenAI-compatible async client and the model name."""
     cfg = await _get_llm_config()
-    client = AsyncOpenAI(base_url=cfg["endpoint"], api_key=cfg["api_key"])
+    import httpx
+    client = AsyncOpenAI(
+        base_url=cfg["endpoint"], 
+        api_key=cfg["api_key"],
+        timeout=httpx.Timeout(LLM_TIMEOUT, connect=10.0)
+    )
     return client, cfg["model"]
 
 

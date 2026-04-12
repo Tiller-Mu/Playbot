@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+import subprocess
+import re
 
 from app.models.database import Project, get_db
 from app.schemas.schemas import ProjectCreate, ProjectUpdate, ProjectOut
@@ -85,3 +87,47 @@ async def pull_project_repo(project_id: str, db: AsyncSession = Depends(get_db))
         return {"message": "代码更新成功"}
     except Exception as e:
         raise HTTPException(500, f"代码更新失败: {str(e)}")
+
+
+@router.get("/{project_id}/branches")
+async def get_remote_branches(project_id: str, db: AsyncSession = Depends(get_db)):
+    """获取远程仓库的所有分支列表"""
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(404, "项目不存在")
+    
+    try:
+        # 使用 git ls-remote --heads 获取远程分支
+        cmd = ["git", "ls-remote", "--heads", project.git_url]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode != 0:
+            raise HTTPException(500, f"Git命令执行失败: {result.stderr}")
+        
+        # 解析输出，提取分支名
+        # 格式: <commit-hash>\trefs/heads/<branch-name>
+        branches = []
+        for line in result.stdout.strip().split('\n'):
+            if line:
+                match = re.search(r'refs/heads/(.+)$', line)
+                if match:
+                    branches.append(match.group(1))
+        
+        # 排序：main/master 排在前面
+        priority_branches = ['main', 'master', 'develop', 'dev']
+        branches.sort(key=lambda x: (
+            priority_branches.index(x) if x in priority_branches else len(priority_branches),
+            x
+        ))
+        
+        return {"branches": branches}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"获取分支列表失败: {str(e)}")

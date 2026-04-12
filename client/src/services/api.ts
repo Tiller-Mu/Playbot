@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type { Project, TestCase, Execution, ExecutionDetail, LLMSettings, TestPage } from '../types'
 
-const api = axios.create({ baseURL: 'http://localhost:8001/api' })
+const api = axios.create({ baseURL: 'http://localhost:8003/api' })
 
 // ---- Project ----
 export const projectApi = {
@@ -14,6 +14,7 @@ export const projectApi = {
   delete: (id: string) => api.delete(`/project/${id}`),
   clone: (id: string) => api.post<{ message: string; repo_path: string }>(`/project/${id}/clone`).then(r => r.data),
   pull: (id: string) => api.post<{ message: string }>(`/project/${id}/pull`).then(r => r.data),
+  getBranches: (id: string) => api.get<{ branches: string[] }>(`/project/${id}/branches`).then(r => r.data),
 }
 
 // ---- Pages ----
@@ -26,6 +27,9 @@ export const pageApi = {
     api.post<TestCase[]>(`/pages/${pageId}/generate`).then(r => r.data),
   getCases: (pageId: string) => 
     api.get<TestCase[]>(`/pages/${pageId}/cases`).then(r => r.data),
+  // MCP生成用例
+  mcpGenerateCases: (pageId: string) => 
+    api.post<TestCase[]>(`/generate/mcp/${pageId}/generate`).then(r => r.data),
 }
 
 // ---- TestCase ----
@@ -49,6 +53,9 @@ export const generateApi = {
   // MCP 页面嗅探（静态分析）
   mcpDiscover: (projectId: string) =>
     api.post<{ message: string; page_count: number; pages: any[] }>('/generate/mcp/discover', { project_id: projectId }).then(r => r.data),
+  // 单页 LLM 分析
+  analyzePage: (pageId: string) =>
+    api.post<{ success: boolean; page_id: string; description: string; interactive_elements: any[]; modals: any[]; forms: any[] }>(`/generate/mcp/analyze-page/${pageId}`).then(r => r.data),
   // 为单个页面生成用例
   mcpGeneratePageCases: (pageId: string) =>
     api.post<TestCase[]>(`/generate/mcp/${pageId}/generate`).then(r => r.data),

@@ -255,6 +255,9 @@ def _build_page_tree(page_files: list[dict], repo: Path) -> list[dict[str, Any]]
             
             # 查找或创建节点
             existing_node = None
+            # 确保children是列表
+            if current.get("children") is None:
+                current["children"] = []
             for child in current["children"]:
                 if child["path"] == part:
                     existing_node = child

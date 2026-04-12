@@ -28,6 +28,7 @@ def build_tree_response(pages: list[TestPage], case_counts: dict[str, int]) -> l
             "full_path": page.full_path,
             "is_leaf": page.is_leaf,
             "component_name": page.component_name,
+            "description": page.description or "",
             "children": [],
             "case_count": case_counts.get(page.id, 0),
         }

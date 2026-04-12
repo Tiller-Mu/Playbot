@@ -18,6 +18,7 @@ export interface TestPage {
   full_path: string
   is_leaf: boolean
   component_name: string | null
+  description?: string
   children?: TestPage[]
   case_count?: number
   file_path?: string

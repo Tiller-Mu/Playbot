@@ -1,6 +1,7 @@
 """页面级MCP分析器 - 使用LLM分析单个页面的组件引用关系。"""
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Optional, Callable
 
@@ -78,15 +79,23 @@ class PageComponentAnalyzer:
             
             if analysis_result:
                 components = analysis_result.get("components", [])
+                description = analysis_result.get("description", "")
+                
+                # 日志输出包含description
+                log_detail = {"route": page_route, "components": components}
+                if description:
+                    log_detail["description"] = description
+                
                 await self._send_log("success", 
                     f"页面 {page_name} 分析完成，发现 {len(components)} 个组件",
-                    {"route": page_route, "components": components}
+                    log_detail
                 )
                 
                 return {
                     "route": page_route,
                     "url": "",
                     "title": analysis_result.get("page_name", page_name),
+                    "description": description,
                     "detected_components": components,
                     "interactive_elements": analysis_result.get("interactive_elements", []),
                     "modals": analysis_result.get("modals", []),
@@ -134,65 +143,60 @@ class PageComponentAnalyzer:
         components_summary: str,
         global_rules: str
     ) -> Optional[dict]:
-        """使用LLM分析页面组件引用关系"""
+        """使用LLM基于命名推断页面功能（简化版，不传完整代码）"""
         
-        prompt = f"""你是一个前端页面分析专家。请分析以下页面的组件结构和交互元素。
+        # 从组件清单中提取组件名列表
+        component_names = []
+        for line in components_summary.split('\n'):
+            # 格式: "- ComponentName (path) - type"
+            match = re.search(r'-\s+(\w+)\s+\(', line)
+            if match:
+                component_names.append(match.group(1))
+        
+        # 构建组件列表字符串
+        component_list_str = '\n'.join(['- ' + name for name in component_names[:15]])
+        
+        prompt = f"""你是一个前端页面分析专家。请根据页面名称和组件列表，推断页面的核心功能。
 
 ## 页面信息
 - 页面名称: {page_name}
 - 路由路径: {page_route}
 
-## 可用组件清单（参考，防止遗漏）
-{components_summary}
-
-## 当前页面源码
-```
-{page_source[:8000]}  # 限制长度，避免token过多
-```
-
-{"## 全局规则\n" + global_rules if global_rules else ""}
+## 页面使用的组件
+{component_list_str}  # 最多15个组件
 
 ## 分析任务
 
-1. **追踪组件引用**
-   - 从import语句中找出所有使用的组件
-   - 追踪被引用组件的import（最多2层深度）
-   - 对于每个组件，判断：
-     * 页面内组件（Modal、Dialog、Form等）✓ 纳入
-     * 路由跳转组件（router-link、Link等）✗ 不纳入components，但记录到navigation_links
+根据页面名称和组件名，用**一句话**描述这个页面的核心功能。
 
-2. **识别交互元素**
-   - 表单（Form）、输入框（Input）、按钮（Button）
-   - 弹窗（Modal/Dialog）
-   - 下拉菜单（Select/Dropdown）
-   - Tab切换、折叠面板
-   - 条件渲染的内容区块
+**命名规律参考**：
+- List/Table结尾 → 列表展示页面
+- Form结尾 → 表单编辑页面  
+- Detail/View结尾 → 详情展示页面
+- Dashboard → 数据仪表盘
+- Login/Register → 登录注册页面
+- Chart/Graph → 图表统计页面
+- Modal/Dialog → 弹窗组件（不是独立页面）
 
-3. **边界规则**
-   - ✓ 分析：当前页面 + 子组件（import链）
-   - ✓ 分析：页面内弹出的表单、对话框
-   - ✗ 排除：router-link跳转的其他页面
-   - ✗ 排除：window.location.href跳转
-   - ✗ 排除：任何会导致路由变化的交互
+**输出要求**：
+- 必须使用**中文**
+- 一句话描述，20-50字
+- 包含主要功能和操作
 
 ## 输出格式（JSON）
 
 ```json
 {{
-  "page_name": "用户管理",
-  "components": ["UserTable", "UserForm", "DeleteConfirmModal"],
-  "interactive_elements": [
-    {{"type": "button", "text": "提交"}},
-    {{"type": "input", "placeholder": "请输入用户名"}}
-  ],
-  "modals": ["DeleteConfirmModal", "UserFormModal"],
-  "forms": ["UserForm"],
-  "navigation_links": [
-    {{"text": "返回首页", "route": "/"}},
-    {{"text": "用户详情", "route": "/user/:id"}}
-  ]
+  "page_name": "{page_name}",
+  "description": "用户列表页面，展示用户信息并支持搜索、分页和编辑操作",
+  "components": {component_names[:10]}  // 最多返回10个组件
 }}
 ```
+
+**注意**：
+- 只返回JSON，不要其他内容
+- description必须是一句话
+- components返回组件名数组即可
 
 请只输出JSON，不要其他内容。"""
 
@@ -216,6 +220,7 @@ class PageComponentAnalyzer:
                 return result
             else:
                 logger.warning(f"LLM分析页面失败，无法解析响应: {page_name}")
+                logger.debug(f"LLM原始响应: {response[:500]}...")  # 记录原始响应用于调试
                 return None
                 
         except Exception as e:
