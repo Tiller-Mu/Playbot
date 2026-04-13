@@ -9,7 +9,7 @@ import {
 
 const router = useRouter()
 const route = useRoute()
-const collapsed = ref(false)
+const collapsed = ref(true)
 
 const selectedKeys = computed(() => {
   if (route.path.startsWith('/settings')) return ['settings']
