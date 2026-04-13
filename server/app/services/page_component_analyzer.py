@@ -67,6 +67,16 @@ class PageComponentAnalyzer:
             components_summary = self._build_components_summary(components_list)
             await self._send_log("debug", f"组件清单已构建: {len(components_list)} 个组件")
             
+            # 从 page_component 中提取注释信息
+            page_comments = page_component.get("page_comments", "")
+            component_comments_str = page_component.get("component_comments", "{}")
+            
+            # 解析组件注释（JSON字符串转字典）
+            try:
+                component_comments = json.loads(component_comments_str) if component_comments_str else {}
+            except:
+                component_comments = {}
+            
             # 使用LLM分析页面
             await self._send_log("info", f"开始LLM分析页面: {page_name}")
             analysis_result = await self._analyze_with_llm(
@@ -74,7 +84,9 @@ class PageComponentAnalyzer:
                 page_route=page_route,
                 page_source=page_source,
                 components_summary=components_summary,
-                global_rules=global_rules
+                global_rules=global_rules,
+                page_comments=page_comments,
+                component_comments=component_comments
             )
             
             if analysis_result:
@@ -141,9 +153,13 @@ class PageComponentAnalyzer:
         page_route: str,
         page_source: str,
         components_summary: str,
-        global_rules: str
+        global_rules: str,
+        page_comments: str = "",
+        component_comments: dict = None
     ) -> Optional[dict]:
         """使用LLM基于命名推断页面功能（简化版，不传完整代码）"""
+        if component_comments is None:
+            component_comments = {}
         
         # 从组件清单中提取组件名列表
         component_names = []
@@ -156,18 +172,39 @@ class PageComponentAnalyzer:
         # 构建组件列表字符串
         component_list_str = '\n'.join(['- ' + name for name in component_names[:15]])
         
-        prompt = f"""你是一个前端页面分析专家。请根据页面名称和组件列表，推断页面的核心功能。
+        # 构建页面注释信息
+        page_comments_section = ""
+        if page_comments:
+            page_comments_section = f"""## 页面注释（开发者编写）
+{page_comments}
+
+"""
+        
+        # 构建组件注释信息
+        component_comments_section = ""
+        if component_comments:
+            comp_comments_lines = []
+            for comp_name, comp_comment in component_comments.items():
+                if comp_comment and len(comp_comment) > 5:
+                    comp_comments_lines.append(f"- **{comp_name}**: {comp_comment}")
+            if comp_comments_lines:
+                component_comments_section = f"""## 组件注释（开发者编写）
+{chr(10).join(comp_comments_lines)}
+
+"""
+        
+        prompt = f"""你是一个前端页面分析专家。请根据页面信息、开发者注释和组件列表，推断页面的核心功能。
 
 ## 页面信息
 - 页面名称: {page_name}
 - 路由路径: {page_route}
 
-## 页面使用的组件
+{page_comments_section}{component_comments_section}## 页面使用的组件
 {component_list_str}  # 最多15个组件
 
 ## 分析任务
 
-根据页面名称和组件名，用**一句话**描述这个页面的核心功能。
+结合页面名称、开发者注释和组件名，用**一句话**描述这个页面的核心功能。
 
 **命名规律参考**：
 - List/Table结尾 → 列表展示页面
@@ -180,22 +217,26 @@ class PageComponentAnalyzer:
 
 **输出要求**：
 - 必须使用**中文**
-- 一句话描述，20-50字
-- 包含主要功能和操作
+- 详细描述，**100-200字**
+- 包含以下内容：
+  1. 页面的主要功能
+  2. 核心交互操作（增删改查、筛选、分页等）
+  3. 关键组件的作用
+  4. 数据展示方式（列表、表单、图表等）
 
 ## 输出格式（JSON）
 
 ```json
 {{
   "page_name": "{page_name}",
-  "description": "用户列表页面，展示用户信息并支持搜索、分页和编辑操作",
+  "description": "这是一个完整的用户管理页面，主要用于展示和维护系统用户信息。页面顶部提供搜索栏，支持按用户名、邮箱等条件进行筛选。主体部分采用数据表格展示用户列表，支持分页浏览、排序和批量操作。每行数据提供编辑和删除按钮，方便管理员快速维护用户信息。页面还集成了权限管理功能，可以设置不同用户的访问权限。",
   "components": {component_names[:10]}  // 最多返回10个组件
 }}
 ```
 
 **注意**：
 - 只返回JSON，不要其他内容
-- description必须是一句话
+- **description必须是100-200字的详细描述**
 - components返回组件名数组即可
 
 请只输出JSON，不要其他内容。"""

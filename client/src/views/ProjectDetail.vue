@@ -160,20 +160,34 @@ async function loadComponents() {
 
 // 建立双向关联
 function buildAssociations() {
-  // 如果pageComponents已经有数据（从WebSocket收到的），直接使用
-  // 否则从页面树数据中获取
-  pageTree.value.forEach(page => {
-    // pageComponents中如果有数据就使用，没有就设为空数组
-    if (!pageComponents.value[page.id]) {
-      const components = (page as any).components || []
-      pageComponents.value[page.id] = components
+  // 递归收集所有页面
+  function collectAllPages(pages: any[]): any[] {
+    let allPages: any[] = []
+    for (const page of pages) {
+      allPages.push(page)
+      if (page.children && page.children.length > 0) {
+        allPages = allPages.concat(collectAllPages(page.children))
+      }
     }
+    return allPages
+  }
+  
+  const allPages = collectAllPages(pageTree.value)
+  
+  // 优先使用页面树API返回的components字段
+  allPages.forEach(page => {
+    // 优先使用 page.components（API返回），其次使用 pageComponents（WebSocket）
+    const apiComponents = (page as any).components || []
+    const wsComponents = pageComponents.value[page.id] || []
+    
+    // 如果API有数据就用API的，否则用WebSocket的
+    pageComponents.value[page.id] = apiComponents.length > 0 ? apiComponents : wsComponents
   })
   
   // 组件 → 页面（反向查找）
   componentList.value.forEach(comp => {
     const usedInPages: string[] = []
-    pageTree.value.forEach(page => {
+    allPages.forEach(page => {
       const pageComps = pageComponents.value[page.id] || []
       if (pageComps.includes(comp.name)) {
         usedInPages.push(page.name || comp.name)

@@ -51,6 +51,9 @@ class TestPage(Base):
     full_path = Column(String(1000), nullable=False, comment="完整路径")
     is_leaf = Column(Boolean, default=False, comment="是否叶子节点（页面）")
     component_name = Column(Text, comment="组件名称列表（JSON格式）")
+    imported_components = Column(Text, comment="静态分析的组件引用列表（JSON格式）")
+    page_comments = Column(Text, comment="页面级注释（文件顶部注释等）")
+    component_comments = Column(Text, comment="组件级注释（JSON格式：{组件名: 注释内容}）")
     description = Column(Text, comment="页面功能描述（Markdown格式）")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

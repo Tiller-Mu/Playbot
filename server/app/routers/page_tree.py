@@ -19,6 +19,28 @@ def build_tree_response(pages: list[TestPage], case_counts: dict[str, int]) -> l
     
     # 创建所有节点
     for page in pages:
+        # 优先使用静态分析的 imported_components，其次使用 component_name
+        components = []
+        
+        # 1. 优先使用 imported_components（从页面源码静态分析得到）
+        if hasattr(page, 'imported_components') and page.imported_components:
+            components = page.imported_components
+        # 2. 其次使用 component_name（从 MCP 分析或数据库得到）
+        elif page.component_name:
+            try:
+                # 尝试解析JSON
+                if isinstance(page.component_name, str):
+                    if page.component_name.startswith('['):
+                        components = json.loads(page.component_name)
+                    else:
+                        # 逗号分隔的字符串
+                        components = [c.strip() for c in page.component_name.split(',') if c.strip()]
+                elif isinstance(page.component_name, list):
+                    components = page.component_name
+            except:
+                # 解析失败，当作单个组件名
+                components = [page.component_name] if page.component_name else []
+        
         node = {
             "id": page.id,
             "project_id": page.project_id,
@@ -28,6 +50,9 @@ def build_tree_response(pages: list[TestPage], case_counts: dict[str, int]) -> l
             "full_path": page.full_path,
             "is_leaf": page.is_leaf,
             "component_name": page.component_name,
+            "components": components,  # 组件列表
+            "page_comments": page.page_comments or "",  # 页面注释
+            "component_comments": page.component_comments or "",  # 组件注释（JSON字符串）
             "description": page.description or "",
             "children": [],
             "case_count": case_counts.get(page.id, 0),
@@ -112,6 +137,11 @@ async def refresh_page_tree(project_id: str, db: AsyncSession = Depends(get_db))
     async def save_tree(nodes: list[dict], parent_id: str | None = None):
         saved_pages = []
         for node in nodes:
+            # 保存静态分析的数据
+            imported_components = node.get("imported_components", [])
+            page_comments = node.get("page_comments", "")
+            component_comments = node.get("component_comments", {})
+            
             page = TestPage(
                 project_id=project_id,
                 parent_id=parent_id,
@@ -120,6 +150,9 @@ async def refresh_page_tree(project_id: str, db: AsyncSession = Depends(get_db))
                 full_path=node.get("full_path", ""),
                 is_leaf=node.get("is_leaf", False),
                 component_name=node.get("component"),
+                imported_components=json.dumps(imported_components, ensure_ascii=False) if imported_components else None,
+                page_comments=page_comments if page_comments else None,
+                component_comments=json.dumps(component_comments, ensure_ascii=False) if component_comments else None,
             )
             db.add(page)
             saved_pages.append(page)

@@ -272,7 +272,9 @@ async def analyze_single_page(page_id: str, db: AsyncSession = Depends(get_db)):
                 'name': page.name,
                 'file_path': file_path_str,
                 'type': 'page',
-                'route': page.full_path
+                'route': page.full_path,
+                'page_comments': page.page_comments or "",
+                'component_comments': page.component_comments or "{}"
             },
             components_list=components_list
         )
@@ -280,6 +282,22 @@ async def analyze_single_page(page_id: str, db: AsyncSession = Depends(get_db)):
         if result:
             # 更新页面信息
             page.description = result.get("description", "")
+            
+            # 保存组件列表（去重）
+            # 注意：page_component_analyzer返回的字段名是detected_components
+            components = result.get("detected_components", result.get("components", []))
+            if components:
+                # 去重并保持顺序
+                seen = set()
+                unique_components = []
+                for comp in components:
+                    if comp not in seen:
+                        seen.add(comp)
+                        unique_components.append(comp)
+                
+                page.component_name = json.dumps(unique_components, ensure_ascii=False)
+                await send_log("info", f"📦 保存 {len(unique_components)} 个组件: {', '.join(unique_components[:5])}...")
+            
             await db.commit()
             
             await send_log("success", f"✓ 页面分析完成: {page.name} - {page.description[:50]}")
