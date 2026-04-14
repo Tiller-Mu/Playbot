@@ -1,181 +1,104 @@
-"""Playwright MCP服务 - 用于页面动态验证和分析。"""
-import asyncio
+"""Playwright MCP服务 - 用于页面动态验证和分析。
+
+使用纯同步API，在独立线程中运行，避免Windows asyncio子进程问题。
+"""
 import logging
 import json
+import base64
+import threading
 from typing import Any, Optional
 from pathlib import Path
+from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 
 logger = logging.getLogger(__name__)
 
 
 class PlaywrightMCPService:
-    """Playwright MCP服务封装 - 用于页面动态分析"""
+    """Playwright MCP服务封装 - 使用独立线程运行同步API"""
     
     def __init__(self, project_id: str = "", headless: bool = True):
         self.project_id = project_id
         self.headless = headless
-        self.browser = None
-        self.context = None
+        self._playwright = None
+        self.browser: Optional[Browser] = None
+        self.context: Optional[BrowserContext] = None
+        self._thread = None
+        self._result = None
+        self._error = None
+        self._event = threading.Event()
         
-    async def initialize(self):
-        """初始化Playwright"""
-        try:
-            from playwright.async_api import async_playwright
-            
-            logger.info("[Playwright MCP] 初始化浏览器...")
-            playwright = await async_playwright().start()
-            
-            # 启动浏览器（默认使用Chromium）
-            self.browser = await playwright.chromium.launch(
-                headless=self.headless,
-                args=['--no-sandbox']
-            )
-            
-            # 创建浏览器上下文
-            self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) Playbot/1.0'
-            )
-            
-            logger.info("[Playwright MCP] 浏览器初始化成功")
-            return True
-            
-        except Exception as e:
-            logger.error(f"[Playwright MCP] 初始化失败: {e}", exc_info=True)
-            return False
+    def _run_in_thread(self, func, *args, **kwargs):
+        """在独立线程中执行Playwright操作"""
+        def thread_target():
+            try:
+                # 每个线程需要自己的playwright实例
+                playwright = sync_playwright().start()
+                
+                browser = playwright.chromium.launch(
+                    headless=self.headless,
+                    args=['--no-sandbox']
+                )
+                
+                context = browser.new_context(
+                    viewport={'width': 1920, 'height': 1080},
+                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) Playbot/1.0'
+                )
+                
+                # 执行操作
+                result = func(context, browser, *args, **kwargs)
+                
+                # 清理
+                browser.close()
+                playwright.stop()
+                
+                self._result = result
+            except Exception as e:
+                logger.error(f"[Playwright MCP] 线程执行失败: {e}", exc_info=True)
+                self._error = e
+            finally:
+                self._event.set()
+        
+        self._thread = threading.Thread(target=thread_target, daemon=True)
+        self._thread.start()
+        self._event.wait(timeout=60)  # 等待60秒
+        
+        if self._error:
+            raise self._error
+        
+        return self._result
     
-    async def analyze_page(
-        self,
-        url: str,
-        page_name: str = "",
-        timeout: int = 30000
-    ) -> Optional[dict[str, Any]]:
-        """
-        分析单个页面
-        
-        参数:
-            url: 页面URL
-            page_name: 页面名称
-            timeout: 超时时间（毫秒）
-        
-        返回:
-            页面分析结果
-        """
-        if not self.context:
-            logger.error("[Playwright MCP] 浏览器未初始化")
-            return None
-        
+    def _analyze_page_sync(self, context, browser, url: str, page_name: str, timeout: int) -> Optional[dict]:
+        """在独立线程中分析页面"""
         page = None
         try:
             logger.info(f"[Playwright MCP] 访问页面: {url}")
-            page = await self.context.new_page()
+            page = context.new_page()
             
             # 访问页面
-            response = await page.goto(url, wait_until='networkidle', timeout=timeout)
+            response = page.goto(url, wait_until='domcontentloaded', timeout=timeout)
             
             if not response or response.status >= 400:
                 logger.warning(f"[Playwright MCP] 页面访问失败: {url} (status: {response.status if response else 'N/A'})")
                 return None
             
             # 等待页面完全加载
-            await page.wait_for_load_state('domcontentloaded', timeout=timeout)
-            await asyncio.sleep(2)  # 等待动态内容加载
-            
-            # 获取Accessibility Tree
-            accessibility_snapshot = await self._get_accessibility_snapshot(page)
-            
-            # 获取页面截图（Base64）
-            screenshot = await self._take_screenshot(page)
-            
-            # 提取交互元素
-            interactive_elements = await self._extract_interactive_elements(page)
+            page.wait_for_load_state('domcontentloaded', timeout=timeout)
+            import time
+            time.sleep(2)  # 等待动态内容加载
             
             # 获取页面标题和元信息
-            title = await page.title()
-            meta_description = await page.evaluate("""
+            title = page.title()
+            meta_description = page.evaluate("""
                 () => {
                     const meta = document.querySelector('meta[name="description"]');
                     return meta ? meta.content : '';
                 }
             """)
             
-            logger.info(f"[Playwright MCP] 页面分析完成: {page_name or url}")
-            
-            return {
-                "url": url,
-                "title": title or page_name,
-                "meta_description": meta_description,
-                "accessibility_tree": accessibility_snapshot,
-                "screenshot": screenshot,
-                "interactive_elements": interactive_elements,
-                "status_code": response.status,
-                "load_time": response.headers.get('x-response-time', 'N/A')
-            }
-            
-        except Exception as e:
-            logger.error(f"[Playwright MCP] 页面分析失败 {url}: {e}", exc_info=True)
-            return None
-        finally:
-            if page:
-                await page.close()
-    
-    async def _get_accessibility_snapshot(self, page) -> dict:
-        """获取Accessibility Tree"""
-        try:
-            # 使用Playwright的accessibility API
-            snapshot = await page.accessibility.snapshot()
-            return self._simplify_snapshot(snapshot)
-        except Exception as e:
-            logger.warning(f"[Playwright MCP] 获取accessibility失败: {e}")
-            return {}
-    
-    def _simplify_snapshot(self, node: dict, depth: int = 0, max_depth: int = 5) -> dict:
-        """简化accessibility快照（限制深度）"""
-        if depth > max_depth:
-            return None
-        
-        simplified = {
-            "role": node.get("role"),
-            "name": node.get("name"),
-            "value": node.get("value"),
-        }
-        
-        # 添加关键属性
-        if node.get("focused"):
-            simplified["focused"] = True
-        if node.get("pressed"):
-            simplified["pressed"] = True
-        if node.get("checked"):
-            simplified["checked"] = node["checked"]
-        
-        # 递归处理子节点
-        children = node.get("children", [])
-        if children and depth < max_depth:
-            simplified["children"] = [
-                self._simplify_snapshot(child, depth + 1, max_depth)
-                for child in children[:20]  # 限制子节点数量
-            ]
-        
-        return simplified
-    
-    async def _take_screenshot(self, page) -> Optional[str]:
-        """获取页面截图（Base64）"""
-        try:
-            screenshot_bytes = await page.screenshot(full_page=False)
-            import base64
-            return base64.b64encode(screenshot_bytes).decode('utf-8')
-        except Exception as e:
-            logger.warning(f"[Playwright MCP] 截图失败: {e}")
-            return None
-    
-    async def _extract_interactive_elements(self, page) -> list[dict]:
-        """提取交互元素"""
-        try:
-            elements = await page.evaluate("""
+            # 提取交互元素
+            interactive_elements = page.evaluate("""
                 () => {
                     const elements = [];
-                    
-                    // 查找所有交互元素
                     const selectors = [
                         'button', 'input', 'select', 'textarea',
                         'a[href]', '[role="button"]', '[role="tab"]',
@@ -186,7 +109,6 @@ class PlaywrightMCPService:
                     selectors.forEach(selector => {
                         document.querySelectorAll(selector).forEach(el => {
                             const rect = el.getBoundingClientRect();
-                            // 只添加可见元素
                             if (rect.width > 0 && rect.height > 0) {
                                 elements.push({
                                     tag: el.tagName.toLowerCase(),
@@ -206,90 +128,83 @@ class PlaywrightMCPService:
                         });
                     });
                     
-                    return elements.slice(0, 50); // 限制数量
+                    return elements.slice(0, 50);
                 }
             """)
-            return elements
+            
+            logger.info(f"[Playwright MCP] 页面分析完成: {page_name or url}")
+            
+            return {
+                "url": url,
+                "title": title or page_name,
+                "meta_description": meta_description,
+                "interactive_elements": interactive_elements,
+                "status_code": response.status,
+                "load_time": response.headers.get('x-response-time', 'N/A')
+            }
+            
         except Exception as e:
-            logger.warning(f"[Playwright MCP] 提取交互元素失败: {e}")
-            return []
+            logger.error(f"[Playwright MCP] 页面分析失败 {url}: {e}", exc_info=True)
+            return None
+        finally:
+            if page:
+                page.close()
     
-    async def verify_page_components(
+    async def analyze_page(
         self,
         url: str,
-        expected_components: list[str],
-        page_name: str = ""
-    ) -> dict[str, Any]:
+        page_name: str = "",
+        timeout: int = 30000
+    ) -> Optional[dict[str, Any]]:
         """
-        验证页面是否包含预期组件
+        分析单个页面（在独立线程中执行）
         
         参数:
             url: 页面URL
-            expected_components: 预期组件列表
             page_name: 页面名称
+            timeout: 超时时间（毫秒）
         
         返回:
-            验证结果
+            页面分析结果
         """
-        analysis = await self.analyze_page(url, page_name)
+        import asyncio
+        loop = asyncio.get_event_loop()
         
-        if not analysis:
-            return {
-                "verified": False,
-                "error": "页面分析失败",
-                "components_found": [],
-                "components_missing": expected_components
-            }
+        # 在线程池中执行，但使用run_in_thread确保所有操作在同一线程
+        def wrapper():
+            return self._run_in_thread(
+                self._analyze_page_sync,
+                url,
+                page_name,
+                timeout
+            )
         
-        # 从accessibility tree中提取组件
-        found_components = self._extract_components_from_tree(
-            analysis.get("accessibility_tree", {})
-        )
-        
-        # 对比预期组件
-        found_set = set(found_components)
-        expected_set = set(expected_components)
-        
-        return {
-            "verified": True,
-            "url": url,
-            "title": analysis.get("title"),
-            "components_found": list(found_set),
-            "components_missing": list(expected_set - found_set),
-            "components_extra": list(found_set - expected_set),
-            "interactive_count": len(analysis.get("interactive_elements", [])),
-            "screenshot": analysis.get("screenshot")
-        }
+        return await loop.run_in_executor(None, wrapper)
     
-    def _extract_components_from_tree(self, tree: dict) -> list[str]:
-        """从accessibility tree中提取组件名称"""
-        components = []
+    async def analyze_pages_batch(
+        self,
+        pages: list[dict],
+        project_id: str = "",
+        timeout: int = 30000
+    ) -> list[dict[str, Any]]:
+        """
+        批量分析多个页面（逐个执行）
         
-        def traverse(node):
-            if not node:
-                return
-            
-            # 提取组件名称
-            name = node.get("name", "")
-            role = node.get("role", "")
-            
-            if name and role not in ['generic', 'text', 'none']:
-                components.append(f"{role}:{name}")
-            
-            # 递归子节点
-            for child in node.get("children", []):
-                traverse(child)
+        参数:
+            pages: 页面列表 [{"url": "...", "name": "..."}]
+            project_id: 项目ID
+            timeout: 超时时间（毫秒）
         
-        traverse(tree)
-        return components
-    
-    async def cleanup(self):
-        """清理资源"""
-        try:
-            if self.context:
-                await self.context.close()
-            if self.browser:
-                await self.browser.close()
-            logger.info("[Playwright MCP] 资源清理完成")
-        except Exception as e:
-            logger.error(f"[Playwright MCP] 清理失败: {e}")
+        返回:
+            页面分析结果列表
+        """
+        results = []
+        for page in pages:
+            result = await self.analyze_page(
+                page["url"],
+                page.get("name", ""),
+                timeout
+            )
+            if result:
+                results.append(result)
+        return results

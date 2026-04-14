@@ -8,8 +8,8 @@ from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
-# LLM调用超时时间（秒）
-LLM_TIMEOUT = 30
+# LLM调用超时时间（秒）- 生成用例可能需要更长时间
+LLM_TIMEOUT = 120  # 从30秒增加到120秒（2分钟）
 
 
 async def _get_llm_config() -> dict:
@@ -51,6 +51,52 @@ async def llm_chat(
         max_tokens=max_tokens,
     )
     return response.choices[0].message.content or ""
+
+
+async def llm_chat_stream(
+    messages: list[dict],
+    temperature: float = 0.3,
+    max_tokens: int = 4096,
+    on_token: callable = None,
+) -> str:
+    """
+    Send a streaming chat completion request.
+    on_token callback receives each token as it arrives.
+    """
+    client, model = await get_llm_client()
+    stream = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        stream=True,  # 启用流式输出
+    )
+    
+    full_content = []
+    chunk_count = 0
+    async for chunk in stream:
+        chunk_count += 1
+        
+        # 尝试多种方式获取内容
+        if chunk.choices:
+            choice = chunk.choices[0]
+            if hasattr(choice, 'delta'):
+                delta = choice.delta
+                # 方式1: delta.content (标准流式)
+                token = None
+                if hasattr(delta, 'content') and delta.content:
+                    token = delta.content
+                # 方式2: delta.reasoning_content (智谱GLM等模型)
+                elif hasattr(delta, 'reasoning_content') and delta.reasoning_content:
+                    token = delta.reasoning_content
+                
+                if token:
+                    full_content.append(token)
+                    if on_token:
+                        await on_token(token)
+    
+    print(f"[LLM-Stream] Total chunks: {chunk_count}, Total content length: {len(''.join(full_content))}", flush=True)
+    return "".join(full_content)
 
 
 async def llm_chat_json(

@@ -22,7 +22,6 @@ const loading = ref(false)
 const cloneLoading = ref(false)
 const mcpDiscoverLoading = ref(false)  // MCP 嗅探加载状态
 const treeLoading = ref(false)
-const pageGenerating = ref<Record<string, boolean>>({})  // 记录每个页面的生成状态
 
 // 视图切换
 const treeViewMode = ref<'pages' | 'components'>('pages')  // 页面/组件切换
@@ -37,6 +36,7 @@ const componentEntryPoints = ref<string[]>([])  // 入口点
 const pageComponents = ref<Record<string, string[]>>({})  // 页面 → 组件
 const componentPages = ref<Record<string, string[]>>({})  // 组件 → 页面
 const selectedNodeId = ref<string | null>(null)
+const checkedPageIds = ref<string[]>([])  // 复选的页面ID列表
 const associationPanel = ref<{
   visible: boolean
   title: string
@@ -62,6 +62,8 @@ const showMCPLog = ref(false)  // 是否显示MCP日志面板
 const mcpLogs = ref<any[]>([])  // MCP日志列表
 const mcpLogWebSocket = ref<WebSocket | null>(null)  // WebSocket连接
 const mcpIsRunning = ref(false)  // MCP是否正在运行
+const mcpLogContainer = ref<HTMLElement | null>(null)  // 日志容器引用
+const userScrolled = ref(false)  // 用户是否手动滚动了
 
 // MCP日志等级图标
 const logLevelIcons: Record<string, string> = {
@@ -87,16 +89,13 @@ const activeTab = computed(() => {
 })
 
 async function loadProject() {
-  console.log('[ProjectDetail] 开始加载项目, projectId:', projectId.value)
   loading.value = true
   try {
     project.value = await projectApi.get(projectId.value)
-    console.log('[ProjectDetail] 项目加载成功:', project.value?.name)
   } catch (e) {
     console.error('[ProjectDetail] 项目加载失败:', e)
   } finally {
     loading.value = false
-    console.log('[ProjectDetail] loading设置为false, project:', project.value?.name)
   }
 }
 
@@ -112,7 +111,7 @@ async function loadPageTree() {
     pageTree.value = res.pages
     
     // 递归获取所有节点ID，默认展开所有层级
-    function getAllPageIds(pages) {
+    function getAllPageIds(pages: any[]): string[] {
       let ids = []
       for (const page of pages) {
         ids.push(page.id)
@@ -174,14 +173,27 @@ function buildAssociations() {
   
   const allPages = collectAllPages(pageTree.value)
   
-  // 优先使用页面树API返回的components字段
+  // 只使用MCP分析后的组件数据
+  // 判断标准：component_name 是 JSON 数组格式（MCP分析结果），而不是对象格式（静态分析）
   allPages.forEach(page => {
-    // 优先使用 page.components（API返回），其次使用 pageComponents（WebSocket）
-    const apiComponents = (page as any).components || []
-    const wsComponents = pageComponents.value[page.id] || []
+    const componentName = page.component_name
     
-    // 如果API有数据就用API的，否则用WebSocket的
-    pageComponents.value[page.id] = apiComponents.length > 0 ? apiComponents : wsComponents
+    // 尝试解析 component_name
+    let mcpComponents = []
+    if (componentName) {
+      try {
+        const parsed = JSON.parse(componentName)
+        // 如果是数组，说明是MCP分析结果
+        if (Array.isArray(parsed)) {
+          mcpComponents = parsed
+        }
+      } catch {
+        // 解析失败，说明不是JSON格式
+      }
+    }
+    
+    // 只使用MCP分析的组件，没有就是空数组（显示为0）
+    pageComponents.value[page.id] = mcpComponents
   })
   
   // 组件 → 页面（反向查找）
@@ -196,8 +208,73 @@ function buildAssociations() {
     componentPages.value[comp.name] = usedInPages
   })
   
-  console.log('[关联] pageComponents:', pageComponents.value)
-  console.log('[关联] componentPages:', componentPages.value)
+  console.log('[关联] 页面-组件关联建立完成')
+}
+
+// 滚动到底部
+function scrollToBottom() {
+  if (userScrolled.value) return  // 用户手动滚动时不自动滚动
+  
+  nextTick(() => {
+    if (mcpLogContainer.value) {
+      mcpLogContainer.value.scrollTop = mcpLogContainer.value.scrollHeight
+    }
+  })
+}
+
+// 监听用户滚动事件
+function onMcpLogScroll() {
+  if (!mcpLogContainer.value) return
+  
+  const { scrollTop, scrollHeight, clientHeight } = mcpLogContainer.value
+  const isAtBottom = scrollHeight - scrollTop - clientHeight < 50
+  
+  // 如果滚动到底部，恢复自动滚动
+  userScrolled.value = !isAtBottom
+}
+
+// 处理树节点复选
+function onTreeCheck(checkedKeys: any, _info: any) {
+  // checkedKeys 可能是对象 {checked: [], halfChecked: []} 或数组
+  let keys = []
+  if (Array.isArray(checkedKeys)) {
+    keys = checkedKeys
+  } else if (checkedKeys && checkedKeys.checked) {
+    keys = checkedKeys.checked
+  }
+  
+  // 直接使用keys，因为a-tree的checked事件已经处理了级联逻辑
+  // 我们只需要过滤掉文件夹的key（通过检查treeData判断）
+  function getAllLeafKeys(nodes: any[]): string[] {
+    let leafKeys: string[] = []
+    for (const node of nodes) {
+      if (node.isLeaf) {
+        leafKeys.push(node.key)
+      }
+      if (node.children && node.children.length > 0) {
+        leafKeys = leafKeys.concat(getAllLeafKeys(node.children))
+      }
+    }
+    return leafKeys
+  }
+  
+  const allLeafKeys = getAllLeafKeys(convertToTreeData(pageTree.value))
+  // 只保留叶子节点的key
+  checkedPageIds.value = keys.filter((k: string) => allLeafKeys.includes(k))
+  
+  // 立即更新路由参数，通知TestCaseList
+  if (route.name === 'TestCases') {
+    // 如果当前在用例页面，直接更新query
+    router.replace({
+      name: 'TestCases',
+      params: { id: projectId.value },
+      query: {
+        ...route.query,
+        page_ids: checkedPageIds.value.length > 0 ? checkedPageIds.value.join(',') : undefined
+      }
+    })
+
+  }
 }
 
 // 显示关联信息面板
@@ -213,9 +290,7 @@ function showAssociationPanel(title: string, type: 'page' | 'component', items: 
 
 // 页面节点选择
 function onPageSelect(selectedKeys: string[], info: any) {
-  console.log('[onPageSelect] 被调用, selectedKeys:', selectedKeys)
-  console.log('[onPageSelect] info.node:', info?.node)
-  console.log('[onPageSelect] info.node.key:', info?.node?.key)
+
   
   // 递归查找页面
   function findPageInTree(pages: any[], pageId: string): any {
@@ -237,15 +312,9 @@ function onPageSelect(selectedKeys: string[], info: any) {
     const pageId = node.key
     const page = findPageInTree(pageTree.value, pageId)
     
-    console.log('[onPageSelect] 从info找到的页面:', page)
-    console.log('[onPageSelect] 页面的description:', page.description)
-    console.log('[onPageSelect] 页面完整数据:', JSON.stringify(page, null, 2))
-    
     if (page) {
       selectedNodeId.value = pageId
       const components = pageComponents.value[pageId] || []
-      console.log('[onPageSelect] 组件列表:', components)
-      console.log('[onPageSelect] 页面描述:', page.description)
       
       showAssociationPanel(
         `页面: ${page.name || page.path}`,
@@ -254,7 +323,8 @@ function onPageSelect(selectedKeys: string[], info: any) {
         page.description  // 传入description
       )
       
-      console.log('[onPageSelect] 面板状态:', associationPanel.value)
+      // 同时触发路由跳转，传递选中的页面IDs
+      handlePageSelect(pageId, page)
       return
     }
   }
@@ -318,22 +388,8 @@ async function handleAnalyzePage(pageId: string) {
   analyzingPages.value[pageId] = true
   showMCPLog.value = true  // 自动展开日志面板
   
-  // 确保 WebSocket 已连接
-  console.log('[handleAnalyzePage] WebSocket状态:', mcpLogWebSocket.value?.readyState)
-  if (!mcpLogWebSocket.value || mcpLogWebSocket.value.readyState !== WebSocket.OPEN) {
-    console.log('[handleAnalyzePage] 重新连接WebSocket...')
-    try {
-      await connectMCPLogWebSocket()
-      console.log('[handleAnalyzePage] WebSocket已连接')
-    } catch (e) {
-      console.error('[handleAnalyzePage] WebSocket连接失败:', e)
-    }
-  } else {
-    console.log('[handleAnalyzePage] WebSocket已连接，直接使用')
-  }
-  
   try {
-    const result = await generateApi.analyzePage(pageId)
+    await generateApi.analyzePage(pageId)
     
     message.success('页面分析完成')
     
@@ -381,7 +437,7 @@ let reconnectAttempts = 0
 const MAX_RECONNECT_ATTEMPTS = 3
 
 function connectMCPLogWebSocket(): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, _reject) => {
     if (mcpLogWebSocket.value) {
       mcpLogWebSocket.value.close()
     }
@@ -391,24 +447,23 @@ function connectMCPLogWebSocket(): Promise<void> {
     const apiBaseURL = 'http://localhost:8003/api'
     const wsPort = apiBaseURL.match(/:(\d+)/)?.[1] || '8003'
     const wsUrl = `ws://localhost:${wsPort}/ws/mcp/${projectId.value}`
-    console.log('连接MCP日志WebSocket:', wsUrl)
     const ws = new WebSocket(wsUrl)
     
     ws.onopen = () => {
-      console.log('MCP日志WebSocket已连接')
       reconnectAttempts = 0  // 重置重连计数
       resolve()  // 连接建立后通知
     }
     
     ws.onmessage = (event) => {
-      console.log('[WebSocket收到消息]', event.data)
       try {
         const logEntry = JSON.parse(event.data)
-        console.log('[WebSocket解析后]', logEntry)
         mcpLogs.value.push({
           ...logEntry,
           id: Date.now() + Math.random()
         })
+        
+        // 自动滚动到底部
+        scrollToBottom()
           
         // 从日志中提取组件关联信息
         if (logEntry.data?.components && logEntry.data?.route) {
@@ -491,19 +546,10 @@ async function handleMCPDiscover() {
   // 先建立WebSocket连接
   showMCPLog.value = true  // 打开面板
   await connectMCPLogWebSocket()  // 等待连接建立
-  console.log('WebSocket连接已建立，开始调用API...')
   
-  console.log('=== MCP 嗅探调试信息 ===')
-  console.log('Project ID:', projectId.value)
-  console.log('Repo Path:', project.value.repo_path)
-  console.log('Base URL:', project.value.base_url)
-  
-  // 直接开始分析，不再弹出确认对话框（日志面板已经打开）
   mcpDiscoverLoading.value = true
   try {
-    console.log('开始调用 MCP 嗅探 API...')
     const result = await generateApi.mcpDiscover(projectId.value)
-    console.log('MCP 嗅探结果:', result)
     message.success(result.message || `MCP 嗅探完成，发现 ${result.page_count} 个页面`)
     
     // 刷新页面树
@@ -527,13 +573,19 @@ function handlePageSelect(pageId: string, page: TestPage) {
   if (page.is_leaf) {
     selectedPageId.value = pageId
     // 触发子组件加载该页面的用例
+    const query: any = { 
+      page_id: pageId,
+      page_path: page.full_path,
+    }
+    
+    // 如果有复选的页面，也传递过去
+    if (checkedPageIds.value.length > 0) {
+      query.page_ids = checkedPageIds.value.join(',')
+    }
     router.push({ 
       name: 'TestCases', 
       params: { id: projectId.value }, 
-      query: { 
-        page_id: pageId,
-        page_path: page.full_path,
-      }
+      query
     })
   }
 }
@@ -564,6 +616,10 @@ onMounted(async () => {
   if (project.value?.repo_path) {
     await loadPageTree()
   }
+  // 连接WebSocket接收MCP日志
+  connectMCPLogWebSocket().catch(err => {
+    console.error('WebSocket连接失败:', err)
+  })
 })
 
 onUnmounted(() => {
@@ -573,12 +629,11 @@ onUnmounted(() => {
 
 <template>
   <div style="position: relative;">
-    <!-- 右侧MCP日志浮动按钮 - 只要有日志历史或正在运行就显示 -->
+    <!-- 右侧MCP日志浮动按钮 - 始终显示，有日志时显示数量 -->
     <div 
-      v-if="mcpLogs.length > 0 || mcpIsRunning"
       style="position: fixed; right: 16px; top: 50%; transform: translateY(-50%); z-index: 1000;"
     >
-      <a-badge :count="mcpLogs.length" :overflow-count="99" :number-style="{ backgroundColor: mcpIsRunning ? '#1890ff' : '#52c41a' }">
+      <a-badge :count="mcpLogs.length > 0 ? mcpLogs.length : undefined" :overflow-count="99" :number-style="{ backgroundColor: mcpIsRunning ? '#1890ff' : '#52c41a' }">
         <a-button 
           type="primary" 
           shape="circle" 
@@ -641,6 +696,17 @@ onUnmounted(() => {
       >
         <template #extra>
           <a-space>
+            <!-- 刷新页面树按钮 -->
+            <a-button 
+              type="text" 
+              size="small" 
+              @click="handleRefreshTree"
+              :loading="treeLoading"
+              title="刷新页面树"
+            >
+              🔄
+            </a-button>
+            
             <!-- 折叠按钮 -->
             <a-button 
               type="text" 
@@ -675,13 +741,16 @@ onUnmounted(() => {
             @select="onPageSelect"
             :selected-keys="selectedNodeId ? [selectedNodeId] : []"
             :show-line="true"
+            checkable
+            :checked-keys="{ checked: checkedPageIds, halfChecked: [] }"
+            @check="onTreeCheck"
           >
             <template #title="{ dataRef }">
               <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                 <span>{{ dataRef.title }}</span>
                 <div style="display: flex; gap: 4px;">
                   <a-tag size="small" :color="dataRef.isLeaf ? 'blue' : 'green'">
-                    {{ dataRef.isLeaf ? `${pageComponents[dataRef.key]?.length || 0} 个组件` : '文件夹' }}
+                    {{ dataRef.isLeaf ? `(${pageComponents[dataRef.key]?.length || 0})` : '📁' }}
                   </a-tag>
                   <a-button 
                     v-if="dataRef.isLeaf"
@@ -728,27 +797,14 @@ onUnmounted(() => {
         </div>
       </a-card>
       
-      <!-- 关联信息面板 -->
-      <a-card 
-        v-if="associationPanel.visible" 
-        :title="associationPanel.title" 
-        :bordered="true" 
-        style="width: 350px; flex-shrink: 0;"
-        :bodyStyle="{ padding: '12px' }"
-        :closable="true"
-        @close="associationPanel.visible = false"
+      <!-- 关联信息浮动窗口 -->
+      <a-modal
+        v-model:open="associationPanel.visible"
+        :title="associationPanel.title"
+        :footer="null"
+        width="600px"
+        :bodyStyle="{ maxHeight: '70vh', overflowY: 'auto' }"
       >
-        <template #extra>
-          <a-button 
-            type="text" 
-            size="small" 
-            @click="associationPanel.visible = false"
-            style="padding: 4px;"
-          >
-            关闭
-          </a-button>
-        </template>
-        
         <!-- 页面描述 -->
         <div v-if="associationPanel.type === 'page'" 
              style="margin-bottom: 16px; padding: 12px; background: #f5f5f5; border-radius: 4px;">
@@ -761,24 +817,40 @@ onUnmounted(() => {
           </div>
         </div>
         
-        <!-- 关联列表 -->
-        <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">
-          {{ associationPanel.type === 'page' ? '🧩 使用的组件' : '📄 使用的页面' }}
+        <!-- 组件列表 -->
+        <div v-if="associationPanel.type === 'page'" style="margin-bottom: 16px;">
+          <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">🧩 使用的组件</div>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <a-tag 
+              v-for="comp in associationPanel.items" 
+              :key="comp"
+              color="blue"
+            >
+              {{ comp }}
+            </a-tag>
+            <span v-if="associationPanel.items.length === 0" style="color: #999; font-size: 13px; font-style: italic;">
+              暂无组件关联，请先进行页面分析
+            </span>
+          </div>
         </div>
-        <a-list 
-          :data-source="associationPanel.items" 
-          size="small"
-          :locale="{ emptyText: associationPanel.type === 'page' ? '暂无组件关联，请先进行页面分析' : '暂无页面使用此组件' }"
-        >
-          <template #renderItem="{ item }">
-            <a-list-item>
-              <a-tag :color="associationPanel.type === 'page' ? 'blue' : 'green'">
-                {{ item }}
-              </a-tag>
-            </a-list-item>
-          </template>
-        </a-list>
-      </a-card>
+        
+        <!-- 页面列表 -->
+        <div v-if="associationPanel.type === 'component'">
+          <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">📄 使用的页面</div>
+          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            <a-tag 
+              v-for="page in associationPanel.items" 
+              :key="page"
+              color="green"
+            >
+              {{ page }}
+            </a-tag>
+            <span v-if="associationPanel.items.length === 0" style="color: #999; font-size: 13px; font-style: italic;">
+              暂无页面使用此组件
+            </span>
+          </div>
+        </div>
+      </a-modal>
 
       <!-- 右侧用例列表 -->
       <a-card style="flex: 1;" :bordered="false" :bodyStyle="{ padding: '0' }">
@@ -812,19 +884,51 @@ onUnmounted(() => {
         </a-space>
       </template>
       
-      <div class="mcp-log-content" style="height: calc(100vh - 120px); overflow-y: auto; font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px;">
+      <div 
+        ref="mcpLogContainer"
+        class="mcp-log-content" 
+        @scroll="onMcpLogScroll"
+        style="height: calc(100vh - 120px); overflow-y: auto; overflow-x: hidden; font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; word-break: break-word;"
+      >
         <div v-if="mcpLogs.length === 0" style="color: #666; text-align: center; padding: 40px;">
           等待日志输出...
         </div>
         <div 
           v-for="log in mcpLogs" 
           :key="log.id"
-          style="margin-bottom: 6px; line-height: 1.5;"
+          style="margin-bottom: 8px;"
         >
-          <span style="color: #888;">{{ log.timestamp?.split('T')[1]?.split('.')[0] || '' }}</span>
-          <span style="margin: 0 6px;">{{ logLevelIcons[log.level] || '📝' }}</span>
-          <span :style="{ color: logLevelColors[log.level] || '#d4d4d4' }">{{ log.message }}</span>
-          <div v-if="log.data" style="margin-left: 80px; color: #6a9955; font-size: 11px;">
+          <!-- 普通日志：显示时间戳和图标 -->
+          <template v-if="log.level !== 'stream'">
+            <div style="margin-bottom: 2px;">
+              <span style="color: #888;">{{ log.timestamp?.split('T')[1]?.split('.')[0] || '' }}</span>
+              <span style="margin: 0 6px;">{{ logLevelIcons[log.level] || '📝' }}</span>
+            </div>
+            <pre :style="{ 
+              color: logLevelColors[log.level] || '#d4d4d4',
+              margin: '0 0 0 30px',
+              whiteSpace: 'pre-wrap',
+              wordWrap: 'break-word',
+              wordBreak: 'break-word',
+              overflowWrap: 'break-word',
+              fontFamily: 'inherit',
+              fontSize: 'inherit',
+              lineHeight: '1.5'
+            }">{{ log.message }}</pre>
+          </template>
+          <!-- 流式内容：直接显示，无时间戳 -->
+          <pre v-else style="
+            color: #d4d4d4;
+            margin: 0;
+            whiteSpace: 'pre-wrap';
+            wordWrap: 'break-word';
+            wordBreak: 'break-word';
+            overflowWrap: 'break-word';
+            fontFamily: 'inherit';
+            fontSize: 'inherit';
+            lineHeight: '1.5'
+          ">{{ log.message }}</pre>
+          <div v-if="log.data" style="margin-left: 30px; color: #6a9955; font-size: 11px; white-space: pre-wrap;">
             {{ JSON.stringify(log.data, null, 2) }}
           </div>
         </div>

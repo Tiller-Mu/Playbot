@@ -25,6 +25,7 @@ const selectedIds = ref<string[]>([])
 const executing = ref(false)
 const generating = ref(false)
 const mcpGenerating = ref(false)
+const selectedPageIds = ref<string[]>([])  // 从ProjectDetail传入的选中页面
 
 // New case modal
 const showNewModal = ref(false)
@@ -59,15 +60,19 @@ async function loadCases() {
 }
 
 async function handleGenerateCases() {
-  if (!pageId.value) {
-    message.warning('请先在左侧选择一个页面')
+  if (selectedPageIds.value.length === 0) {
+    message.warning('请先在左侧勾选一个或多个页面')
     return
   }
   
   generating.value = true
   try {
-    const newCases = await pageApi.generateCases(pageId.value)
-    message.success(`成功生成 ${newCases.length} 条测试用例`)
+    let totalCases = 0
+    for (const pid of selectedPageIds.value) {
+      const newCases = await pageApi.generateCases(pid)
+      totalCases += newCases.length
+    }
+    message.success(`为 ${selectedPageIds.value.length} 个页面生成 ${totalCases} 条测试用例`)
     await loadCases()
   } catch (e: any) {
     message.error(e.response?.data?.detail || '用例生成失败')
@@ -76,17 +81,21 @@ async function handleGenerateCases() {
   }
 }
 
-// MCP生成用例
+// MCP生成用例（支持批量）
 async function handleMCPGenerate() {
-  if (!pageId.value) {
-    message.warning('请先在左侧选择一个页面')
+  if (selectedPageIds.value.length === 0) {
+    message.warning('请先在左侧勾选一个或多个页面')
     return
   }
   
   mcpGenerating.value = true
   try {
-    const newCases = await pageApi.mcpGenerateCases(pageId.value)
-    message.success(`MCP成功生成 ${newCases.length} 条测试用例`)
+    let totalCases = 0
+    for (const pid of selectedPageIds.value) {
+      const newCases = await pageApi.mcpGenerateCases(pid)
+      totalCases += newCases.length
+    }
+    message.success(`为 ${selectedPageIds.value.length} 个页面生成 ${totalCases} 条测试用例`)
     await loadCases()
   } catch (e: any) {
     message.error(e.response?.data?.detail || 'MCP用例生成失败')
@@ -137,8 +146,6 @@ async function handleCreateCase() {
       project_id: projectId.value,
       title: newForm.value.title,
       description: newForm.value.description,
-      // 如果选中了页面，自动关联
-      page_id: pageId.value || null,
     })
     message.success('用例已创建')
     showNewModal.value = false
@@ -171,6 +178,26 @@ watch(() => route.query.page_id, () => {
   loadCases()
 })
 
+// 监听 page_ids 变化（复选的多个页面）
+watch(
+  () => route.query.page_ids,
+  (newPageIds) => {
+    if (newPageIds) {
+      selectedPageIds.value = (newPageIds as string).split(',')
+    } else {
+      selectedPageIds.value = []
+    }
+  },
+  { immediate: true }
+)
+
+// 初始化：从路由中恢复选中状态
+onMounted(() => {
+  if (route.query.page_ids) {
+    selectedPageIds.value = (route.query.page_ids as string).split(',')
+  }
+})
+
 onMounted(loadCases)
 </script>
 
@@ -201,16 +228,18 @@ onMounted(loadCases)
           type="primary" 
           @click="handleMCPGenerate" 
           :loading="mcpGenerating"
-          :disabled="!pageId"
+          :disabled="selectedPageIds.length === 0"
         >
-          <RobotOutlined /> MCP生成用例
+          <RobotOutlined /> 
+          {{ selectedPageIds.length > 0 ? `MCP批量生成 (${selectedPageIds.length})` : 'MCP生成用例' }}
         </a-button>
         <a-button 
           @click="handleGenerateCases" 
           :loading="generating"
-          :disabled="!pageId"
+          :disabled="selectedPageIds.length === 0"
         >
-          <ThunderboltOutlined /> 传统生成
+          <ThunderboltOutlined /> 
+          {{ selectedPageIds.length > 0 ? `批量生成 (${selectedPageIds.length})` : '传统生成' }}
         </a-button>
         <a-button @click="showNewModal = true"><PlusOutlined /> 新增用例</a-button>
         <a-button type="primary" @click="handleRunSelected" :loading="executing">

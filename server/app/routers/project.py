@@ -13,11 +13,30 @@ router = APIRouter(prefix="/api/project", tags=["project"])
 
 @router.post("", response_model=ProjectOut)
 async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)):
+    """创建项目 - 支持Git仓库或本地路径"""
+    import os
+    
+    repo_path = None
+    
+    # 如果提供了本地路径，直接使用
+    if data.local_path:
+        # 验证路径存在
+        if not os.path.exists(data.local_path):
+            raise HTTPException(400, f"本地路径不存在: {data.local_path}")
+        
+        # 转为绝对路径
+        repo_path = os.path.abspath(data.local_path)
+        
+        # 验证是目录
+        if not os.path.isdir(repo_path):
+            raise HTTPException(400, f"本地路径不是目录: {repo_path}")
+    
     project = Project(
         name=data.name,
-        git_url=data.git_url,
+        git_url=data.git_url or "",  # 如果没有git_url，使用空字符串
         branch=data.branch,
         base_url=data.base_url,
+        repo_path=repo_path,  # 设置本地路径
     )
     db.add(project)
     await db.commit()

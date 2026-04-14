@@ -9,6 +9,14 @@ export interface Project {
   updated_at: string
 }
 
+export interface ProjectCreate {
+  name: string
+  git_url?: string  // Git仓库地址（可选）
+  branch?: string
+  base_url: string
+  local_path?: string  // 本地代码路径（可选）
+}
+
 export interface TestPage {
   id: string
   project_id: string

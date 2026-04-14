@@ -19,6 +19,8 @@ const form = ref({
   git_url: '',
   branch: 'main',
   base_url: '',
+  local_path: '',  // 本地代码路径
+  use_local_path: false,  // 是否使用本地路径
 })
 
 // 分支列表相关
@@ -62,24 +64,57 @@ function handleEdit(project: Project) {
     git_url: project.git_url,
     branch: project.branch || 'main',
     base_url: project.base_url,
+    local_path: project.repo_path || '',  // 显示已有的repo_path
+    use_local_path: !!project.repo_path,  // 如果有repo_path，默认选中本地路径
   }
   branches.value = [] // 清空之前的分支列表
   showEditModal.value = true
   // 异步加载分支列表
-  loadBranches(project.id)
+  if (!project.repo_path) {
+    loadBranches(project.id)
+  }
 }
 
 async function handleCreate() {
-  if (!form.value.name || !form.value.git_url || !form.value.base_url) {
-    message.warning('请填写完整信息')
+  // 验证：必须填写项目名称和base_url
+  if (!form.value.name || !form.value.base_url) {
+    message.warning('请填写项目名称和被测站点URL')
     return
   }
+  
+  // 如果使用本地路径，验证local_path
+  if (form.value.use_local_path && !form.value.local_path) {
+    message.warning('请填写本地代码路径')
+    return
+  }
+  
+  // 如果不使用本地路径，验证git_url
+  if (!form.value.use_local_path && !form.value.git_url) {
+    message.warning('请填写Git仓库地址或选择使用本地路径')
+    return
+  }
+  
   formLoading.value = true
   try {
-    await projectApi.create(form.value)
+    // 构建提交数据
+    const createData: any = {
+      name: form.value.name,
+      base_url: form.value.base_url,
+      branch: form.value.branch,
+    }
+    
+    if (form.value.use_local_path) {
+      // 使用本地路径
+      createData.local_path = form.value.local_path
+    } else {
+      // 使用Git仓库
+      createData.git_url = form.value.git_url
+    }
+    
+    await projectApi.create(createData)
     message.success('项目创建成功')
     showModal.value = false
-    form.value = { name: '', git_url: '', branch: 'main', base_url: '' }
+    form.value = { name: '', git_url: '', branch: 'main', base_url: '', local_path: '', use_local_path: false }
     await loadProjects()
   } catch (e: any) {
     message.error(e.response?.data?.detail || '创建失败')
@@ -168,14 +203,35 @@ onMounted(loadProjects)
         <a-form-item label="项目名称" required>
           <a-input v-model:value="form.name" placeholder="如：我的电商平台" />
         </a-form-item>
-        <a-form-item label="Git 仓库地址" required>
+        
+        <!-- 选择代码来源 -->
+        <a-form-item label="代码来源">
+          <a-radio-group v-model:value="form.use_local_path">
+            <a-radio :value="false">Git 仓库</a-radio>
+            <a-radio :value="true">本地路径</a-radio>
+          </a-radio-group>
+        </a-form-item>
+        
+        <!-- Git仓库地址 -->
+        <a-form-item v-if="!form.use_local_path" label="Git 仓库地址" required>
           <a-input v-model:value="form.git_url" placeholder="https://github.com/user/repo.git" />
         </a-form-item>
-        <a-form-item label="分支">
+        
+        <!-- 本地路径 -->
+        <a-form-item v-if="form.use_local_path" label="本地代码路径" required>
+          <a-input v-model:value="form.local_path" placeholder="D:\project\my-app" />
+          <div style="color: #999; font-size: 12px; margin-top: 4px;">
+            直接指向前端源码目录，例如：d:\dpProject\Playbot\client
+          </div>
+        </a-form-item>
+        
+        <!-- 分支（仅Git仓库需要） -->
+        <a-form-item v-if="!form.use_local_path" label="分支">
           <a-input v-model:value="form.branch" placeholder="main 或 master" />
         </a-form-item>
+        
         <a-form-item label="被测站点 URL" required>
-          <a-input v-model:value="form.base_url" placeholder="https://example.com" />
+          <a-input v-model:value="form.base_url" placeholder="https://example.com 或 http://localhost:5173" />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -186,10 +242,27 @@ onMounted(loadProjects)
         <a-form-item label="项目名称" required>
           <a-input v-model:value="form.name" placeholder="如：我的电商平台" />
         </a-form-item>
-        <a-form-item label="Git 仓库地址" required>
+        
+        <!-- 选择代码来源 -->
+        <a-form-item label="代码来源">
+          <a-radio-group v-model:value="form.use_local_path">
+            <a-radio :value="false">Git 仓库</a-radio>
+            <a-radio :value="true">本地路径</a-radio>
+          </a-radio-group>
+        </a-form-item>
+        
+        <!-- Git仓库地址 -->
+        <a-form-item v-if="!form.use_local_path" label="Git 仓库地址" required>
           <a-input v-model:value="form.git_url" placeholder="https://github.com/user/repo.git" />
         </a-form-item>
-        <a-form-item label="分支">
+        
+        <!-- 本地路径 -->
+        <a-form-item v-if="form.use_local_path" label="本地代码路径" required>
+          <a-input v-model:value="form.local_path" placeholder="D:\project\my-app" />
+        </a-form-item>
+        
+        <!-- 分支（仅Git仓库需要） -->
+        <a-form-item v-if="!form.use_local_path" label="分支">
           <a-select 
             v-model:value="form.branch" 
             placeholder="选择分支"

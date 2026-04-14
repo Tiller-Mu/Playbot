@@ -50,6 +50,7 @@ class TestPage(Base):
     path = Column(String(500), nullable=False, comment="路径片段")
     full_path = Column(String(1000), nullable=False, comment="完整路径")
     is_leaf = Column(Boolean, default=False, comment="是否叶子节点（页面）")
+    file_path = Column(String(500), comment="源代码文件相对路径")
     component_name = Column(Text, comment="组件名称列表（JSON格式）")
     imported_components = Column(Text, comment="静态分析的组件引用列表（JSON格式）")
     page_comments = Column(Text, comment="页面级注释（文件顶部注释等）")

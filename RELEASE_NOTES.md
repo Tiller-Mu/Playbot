@@ -1,5 +1,63 @@
 # 发布日志
 
+## v0.1.9 (2026-04-14)
+
+### 新增功能
+- ✨ Windows平台Playwright完全兼容
+  - 使用同步API + 独立线程方案，彻底解决asyncio子进程问题
+  - 消除greenlet跨线程切换错误
+  - 每次分析自动创建/关闭浏览器，无需手动管理生命周期
+  - 移除`initialize()`和`cleanup()`方法，简化API调用
+
+### 优化改进
+- 🔧 测试用例生成流程优化
+  - Playwright分析改为独立线程执行，避免事件循环冲突
+  - DOM获取失败时立即退出，不继续静态分析
+  - 使用`file_path`字段读取完整源代码路径
+  - 增强错误提示，指导用户排查问题
+
+- 🎨 MCP日志显示优化
+  - 修复横向滚动条问题，实现连续文本显示
+  - 添加智能滚动控制，用户手动滚动时暂停自动滚动
+  - 优化CSS文本换行策略
+
+- 🎯 项目结构清理
+  - 删除30+个临时脚本和测试文件
+  - 删除备份文件和已执行的迁移脚本
+  - 清理空目录（scripts、alembic、.pytest_cache）
+  - 代码库更加整洁，只保留核心功能代码
+
+### 问题修复
+- 🐛 修复Playwright在Windows上的NotImplementedError
+  - 根本原因：asyncio ProactorEventLoop不支持subprocess_exec
+  - 解决方案：使用同步API + threading独立线程
+  - 所有Playwright操作在同一线程完成，避免greenlet冲突
+
+- 🐛 修复源代码文件路径错误
+  - 数据库新增`file_path`字段存储完整相对路径
+  - 前端创建页面时传递file_path
+  - 后端使用file_path读取Vue源代码
+
+- 🐛 修复启动脚本Windows兼容性
+  - 使用`cmd /c`包装命令，避免shell冲突
+  - 修复`CREATE_NEW_CONSOLE`和`shell=True`的兼容性问题
+
+### 技术细节
+- PlaywrightMCPService架构重构
+  - 从异步API改为同步API + threading
+  - 使用`_run_in_thread()`确保线程安全
+  - 每次调用自动创建和清理浏览器实例
+  - 线程超时保护（60秒）
+
+- 代码清理
+  - 删除6个测试脚本（test_*.py）
+  - 删除3个迁移脚本（migrate_*.py）
+  - 删除1个备份文件（generate_backup.py）
+  - 删除5个一次性脚本（install_deps、setup等）
+  - 删除2个代码修改脚本（enhance、integrate）
+
+---
+
 ## v0.1.8 (2026-04-13)
 
 ### 新增功能

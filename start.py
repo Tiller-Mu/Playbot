@@ -48,10 +48,14 @@ def start_backend():
         kill_process_by_port(port)
         time.sleep(1)
     
-    # 启动后端（新窗口）
-    print(f"   ✓ 启动后端服务 (端口: {port})")
+    # 使用Python 3.10启动后端（避免Python 3.14的asyncio subprocess问题）
+    print(f"   ✓ 启动后端服务 (端口: {port}, Python 3.10)")
+    
+    # 使用cmd /c来执行py命令
+    cmd = f'cmd /c py -3.10 -m uvicorn app.main:app --reload --port {port}'
+    
     subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "app.main:app", "--reload", "--port", str(port)],
+        cmd,
         cwd=server_dir,
         creationflags=subprocess.CREATE_NEW_CONSOLE
     )

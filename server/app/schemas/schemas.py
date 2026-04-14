@@ -5,9 +5,10 @@ from pydantic import BaseModel
 # ---- Project ----
 class ProjectCreate(BaseModel):
     name: str
-    git_url: str
+    git_url: str | None = None  # Git仓库地址（可选）
     branch: str = "main"
     base_url: str
+    local_path: str | None = None  # 本地代码路径（可选）
 
 
 class ProjectUpdate(BaseModel):

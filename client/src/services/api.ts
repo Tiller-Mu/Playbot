@@ -29,7 +29,7 @@ export const pageApi = {
     api.get<TestCase[]>(`/pages/${pageId}/cases`).then(r => r.data),
   // MCP生成用例
   mcpGenerateCases: (pageId: string) => 
-    api.post<TestCase[]>(`/generate/mcp/${pageId}/generate`).then(r => r.data),
+    api.post<TestCase[]>(`/pages/${pageId}/generate`).then(r => r.data),
 }
 
 // ---- TestCase ----
