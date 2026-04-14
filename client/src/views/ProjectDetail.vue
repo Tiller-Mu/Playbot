@@ -884,51 +884,41 @@ onUnmounted(() => {
         </a-space>
       </template>
       
+      <!-- MCP日志容器 -->
       <div 
         ref="mcpLogContainer"
         class="mcp-log-content" 
         @scroll="onMcpLogScroll"
-        style="height: calc(100vh - 120px); overflow-y: auto; overflow-x: hidden; font-family: 'Monaco', 'Menlo', monospace; font-size: 12px; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px; word-break: break-word;"
+        style="height: calc(100vh - 120px); overflow-y: auto; font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace; font-size: 12px; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 4px;"
       >
         <div v-if="mcpLogs.length === 0" style="color: #666; text-align: center; padding: 40px;">
           等待日志输出...
         </div>
+        
+        <!-- 日志消息列表 -->
         <div 
           v-for="log in mcpLogs" 
           :key="log.id"
-          style="margin-bottom: 8px;"
+          class="log-message"
         >
           <!-- 普通日志：显示时间戳和图标 -->
           <template v-if="log.level !== 'stream'">
-            <div style="margin-bottom: 2px;">
-              <span style="color: #888;">{{ log.timestamp?.split('T')[1]?.split('.')[0] || '' }}</span>
-              <span style="margin: 0 6px;">{{ logLevelIcons[log.level] || '📝' }}</span>
+            <div class="log-header">
+              <span class="log-time">{{ log.timestamp?.split('T')[1]?.split('.')[0] || '' }}</span>
+              <span class="log-icon">{{ logLevelIcons[log.level] || '📝' }}</span>
             </div>
-            <pre :style="{ 
-              color: logLevelColors[log.level] || '#d4d4d4',
-              margin: '0 0 0 30px',
-              whiteSpace: 'pre-wrap',
-              wordWrap: 'break-word',
-              wordBreak: 'break-word',
-              overflowWrap: 'break-word',
-              fontFamily: 'inherit',
-              fontSize: 'inherit',
-              lineHeight: '1.5'
-            }">{{ log.message }}</pre>
+            <div class="log-body">
+              {{ log.message }}
+            </div>
           </template>
+          
           <!-- 流式内容：直接显示，无时间戳 -->
-          <pre v-else style="
-            color: #d4d4d4;
-            margin: 0;
-            whiteSpace: 'pre-wrap';
-            wordWrap: 'break-word';
-            wordBreak: 'break-word';
-            overflowWrap: 'break-word';
-            fontFamily: 'inherit';
-            fontSize: 'inherit';
-            lineHeight: '1.5'
-          ">{{ log.message }}</pre>
-          <div v-if="log.data" style="margin-left: 30px; color: #6a9955; font-size: 11px; white-space: pre-wrap;">
+          <div v-else class="log-body log-stream">
+            {{ log.message }}
+          </div>
+          
+          <!-- 附加数据 -->
+          <div v-if="log.data" class="log-data">
             {{ JSON.stringify(log.data, null, 2) }}
           </div>
         </div>
@@ -936,3 +926,55 @@ onUnmounted(() => {
     </a-drawer>
   </div>
 </template>
+
+<style scoped>
+/* 日志消息容器 */
+.log-message {
+  margin-bottom: 12px;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+/* 日志头部（时间戳 + 图标） */
+.log-header {
+  margin-bottom: 4px;
+  color: #888;
+  font-size: 11px;
+}
+
+.log-time {
+  margin-right: 8px;
+}
+
+.log-icon {
+  margin-right: 6px;
+}
+
+/* 日志主体内容 */
+.log-body {
+  color: #d4d4d4;
+  margin-left: 28px;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+/* 流式日志（LLM输出） */
+.log-stream {
+  color: #d4d4d4;
+}
+
+/* 附加数据（JSON） */
+.log-data {
+  margin-left: 28px;
+  color: #6a9955;
+  font-size: 11px;
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+</style>

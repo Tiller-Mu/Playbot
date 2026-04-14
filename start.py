@@ -52,12 +52,13 @@ def start_backend():
     print(f"   ✓ 启动后端服务 (端口: {port}, Python 3.10)")
     
     # 使用cmd /c来执行py命令
-    cmd = f'cmd /c py -3.10 -m uvicorn app.main:app --reload --port {port}'
+    cmd = f'py -3.10 -m uvicorn app.main:app --reload --port {port}'
     
+    # 使用start命令确保弹出新窗口
     subprocess.Popen(
-        cmd,
+        f'start "Playbot Backend" cmd /k {cmd}',
         cwd=server_dir,
-        creationflags=subprocess.CREATE_NEW_CONSOLE
+        shell=True
     )
     
     print("   ✓ 后端服务已启动（新窗口）")
@@ -86,10 +87,12 @@ def start_frontend():
     
     # 启动前端（新窗口）
     print(f"   ✓ 启动前端服务 (端口: {port})")
+    
+    # 使用start命令确保弹出新窗口
     subprocess.Popen(
-        ["cmd", "/c", "npm", "run", "dev"],
+        'start "Playbot Frontend" cmd /k npm run dev',
         cwd=client_dir,
-        creationflags=subprocess.CREATE_NEW_CONSOLE
+        shell=True
     )
     
     print("   ✓ 前端服务已启动（新窗口）")

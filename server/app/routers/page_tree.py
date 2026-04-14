@@ -494,24 +494,35 @@ async def generate_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
     try:
         content = raw.strip()
         
-        # 智能提取JSON - 跳过LLM的分析过程，直接找到JSON部分
-        # 从后往前找，因为JSON通常在最后
-        last_brace = content.rfind("}")
-        if last_brace == -1:
-            raise ValueError("未找到JSON结束标记 }")
+        # 第一步：尝试提取JSON代码块
+        # 匹配 ```json ... ``` 或 ``` ... ```
+        import re
+        # 使用贪婪匹配，匹配到最后一个}```
+        json_block_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', content, re.DOTALL)
         
-        # 找test_cases字段
-        test_cases_idx = content.rfind('"test_cases"')
-        if test_cases_idx == -1:
-            raise ValueError("未找到test_cases字段")
-        
-        # 从test_cases往前找{
-        start_idx = content.rfind("{", 0, test_cases_idx)
-        if start_idx == -1:
-            raise ValueError("未找到JSON开始标记 {")
-        
-        content = content[start_idx:last_brace+1]
-        await send_log("info", f"✅ 提取JSON成功: {len(content)} 字")
+        if json_block_match:
+            # 从代码块中提取JSON
+            content = json_block_match.group(1)
+            await send_log("info", f"✅ 从代码块中提取JSON: {len(content)} 字")
+        else:
+            # 第二步：智能提取JSON - 跳过LLM的分析过程，直接找到JSON部分
+            # 从后往前找，因为JSON通常在最后
+            last_brace = content.rfind("}")
+            if last_brace == -1:
+                raise ValueError("未找到JSON结束标记 }")
+            
+            # 找test_cases字段
+            test_cases_idx = content.rfind('"test_cases"')
+            if test_cases_idx == -1:
+                raise ValueError("未找到test_cases字段")
+            
+            # 从test_cases往前找{
+            start_idx = content.rfind("{", 0, test_cases_idx)
+            if start_idx == -1:
+                raise ValueError("未找到JSON开始标记 {")
+            
+            content = content[start_idx:last_brace+1]
+            await send_log("info", f"✅ 提取JSON成功: {len(content)} 字")
         
         print(f"[生成用例] 解析内容长度: {len(content)}, 前100字: {content[:100]}", flush=True)
         
