@@ -46,7 +46,7 @@ workspace/data.db
 workspace/sessions/     # 录制会话文件
 workspace/repos/**/     # 克隆的代码仓库（包括嵌套Git）
 workspace/tests/        # 测试输出
-server/workspace/       # server下的workspace（录制会话等）
+server/workspace/       # server下的workspace
 !workspace/repos/.gitkeep  # 保留目录结构
 !workspace/sessions/.gitkeep
 !workspace/tests/.gitkeep
