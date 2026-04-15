@@ -42,6 +42,14 @@ dist/
 *.sqlite3
 workspace/data.db
 
+# Workspace 运行时数据（不应提交到Git）
+workspace/sessions/     # 录制会话文件
+workspace/repos/**/     # 克隆的代码仓库（包括嵌套Git）
+workspace/tests/        # 测试输出
+!workspace/repos/.gitkeep  # 保留目录结构
+!workspace/sessions/.gitkeep
+!workspace/tests/.gitkeep
+
 # Playwright 浏览器
 .cache/
 ms-playwright/
@@ -75,3 +83,4 @@ logs/
 Thumbs.db
 .DS_Store
 desktop.ini
+server/workspace/sessions/9ced15c2-ed63-4f88-9d99-95041fc9cce1.json
