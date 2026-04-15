@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
-from app.models.database import Project, get_db
+from app.models.database import Project, TestPage, get_db
 from app.services.recording_session import RecordingSession
 from app.services.coverage_analyzer import CoverageAnalyzer
 from app.services.playwright_mcp import PlaywrightMCPService
@@ -27,9 +27,9 @@ def _get_session(project_id: str) -> RecordingSession:
     return _sessions[project_id]
 
 
-@router.post("/{project_id}/start")
+@router.api_route("/{project_id}/start", methods=["GET", "POST"])
 async def start_recording(project_id: str, db: AsyncSession = Depends(get_db)):
-    """开始/继续录制"""
+    """开始/继续录制 - 支持GET/POST以便调试"""
     # 验证项目存在
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
@@ -53,8 +53,14 @@ async def start_recording(project_id: str, db: AsyncSession = Depends(get_db)):
         
         # 启动浏览器
         base_url = project.base_url
-        session.start(base_url=base_url)
-        session.launch_browser()
+        print(f"[录制路由] 准备启动浏览器，项目: {project.name}, URL: {base_url}", flush=True)
+        try:
+            session.start(base_url=base_url)
+            session.launch_browser()
+            print(f"[录制路由] 浏览器启动命令已发出", flush=True)
+        except Exception as e:
+            print(f"[录制路由] ❌ 启动失败: {str(e)}", flush=True)
+            raise HTTPException(500, f"启动录制失败: {str(e)}")
         
         return {
             "message": "开始录制，浏览器窗口已打开",
@@ -95,18 +101,72 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
     
     session.stop()
     
-    # 获取项目信息（如果不存在，使用降级策略）
+    # 获取项目信息
     result = await db.execute(select(Project).where(Project.id == project_id))
     project = result.scalar_one_or_none()
     
-    repo_path = None
-    if project:
-        repo_path = project.repo_path or f"workspace/repos/{project_id}"
-        logger.info(f"[录制API] 使用项目repo_path: {repo_path}")
-    else:
-        logger.warning(f"[录制API] 项目不存在: {project_id}，使用降级策略")
-        # 尝试从session文件目录推断
-        repo_path = f"workspace/repos/{project_id}"
+    if not project:
+        raise HTTPException(404, "项目不存在")
+
+    # 同步录制到的页面到数据库
+    print(f"[录制API] 正在同步 {len(session.discovered_pages)} 个发现的页面到数据库...", flush=True)
+    for route_pattern, page_data in session.discovered_pages.items():
+        # 1. 寻找现有记录（包括带/不带斜杠的情况）
+        existing_page = None
+        search_patterns = [route_pattern]
+        alt_pattern = route_pattern[:-1] if route_pattern.endswith('/') and len(route_pattern) > 1 else route_pattern + '/'
+        search_patterns.append(alt_pattern)
+        
+        page_result = await db.execute(
+            select(TestPage).where(
+                TestPage.project_id == project_id,
+                TestPage.full_path.in_(search_patterns)
+            )
+        )
+        existing_page = page_result.scalar_one_or_none()
+        
+        # 2. 寻找具有源码路径的静态页面（供继承信息使用）
+        static_page_result = await db.execute(
+            select(TestPage).where(
+                TestPage.project_id == project_id,
+                TestPage.full_path.in_(search_patterns),
+                TestPage.file_path != None
+            )
+        )
+        static_page = static_page_result.scalar_one_or_none()
+
+        if existing_page:
+            # 状态更新
+            existing_page.is_captured = True
+            # 如果现有记录缺失关键信息，则从静态页面补全
+            if static_page:
+                if not existing_page.file_path:
+                    existing_page.file_path = static_page.file_path
+                if not existing_page.component_name:
+                    existing_page.component_name = static_page.component_name
+                if not existing_page.imported_components:
+                    existing_page.imported_components = static_page.imported_components
+            print(f"[录制API] 状态同步成功: {existing_page.full_path} (ID: {existing_page.id})", flush=True)
+        else:
+            # 仅当完全找不到记录时才创建新记录
+            new_page = TestPage(
+                project_id=project_id,
+                name=route_pattern,
+                path=route_pattern.split('/')[-1] or '/',
+                full_path=route_pattern,
+                is_leaf=True,
+                is_captured=True,
+                file_path=static_page.file_path if static_page else None,
+                component_name=static_page.component_name if static_page else None,
+                imported_components=static_page.imported_components if static_page else None,
+                description=f"通过录制自动发现的页面: {route_pattern}"
+            )
+            db.add(new_page)
+            print(f"[录制API] 创建新页面记录: {route_pattern}", flush=True)
+    
+    await db.commit()
+    
+    repo_path = project.repo_path or f"workspace/repos/{project_id}"
     
     # 分析覆盖率
     analyzer = CoverageAnalyzer()
@@ -124,11 +184,17 @@ async def get_recording_status(project_id: str):
     """获取录制状态"""
     session = _get_session(project_id)
     
+    # 动态计算实时时长
+    current_duration = session.total_duration
+    if session.status == 'recording' and session.start_time:
+        import time
+        current_duration += (time.time() - session.start_time)
+    
     return {
         "status": session.status,
         "discovered_count": len(session.discovered_pages),
         "discovered_pages": list(session.discovered_pages.keys()),
-        "duration": session.total_duration
+        "duration": current_duration
     }
 
 

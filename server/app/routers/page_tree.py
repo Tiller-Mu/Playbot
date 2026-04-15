@@ -54,6 +54,7 @@ def build_tree_response(pages: list[TestPage], case_counts: dict[str, int]) -> l
             "page_comments": page.page_comments or "",  # 页面注释
             "component_comments": page.component_comments or "",  # 组件注释（JSON字符串）
             "description": page.description or "",
+            "is_captured": page.is_captured or False,  # 是否已录制
             "children": [],
             "case_count": case_counts.get(page.id, 0),
         }
@@ -219,141 +220,169 @@ async def generate_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
     await send_log("info", f"🔍 开始为页面生成用例: {page.name}")
     await send_log("info", f"📄 页面路径: {page.full_path}")
     
-    # 第一步：使用PlaywrightMCP获取真实DOM数据
-    await send_log("info", "🌐 正在使用Playwright访问页面获取DOM数据...")
+    # 第一步：获取真实DOM数据 (优先从录制会话获取)
+    from app.routers.recording import _get_session
+    session = _get_session(project.id)
     
-    mcp = PlaywrightMCPService(headless=True)
     dom_data = None
-    try:
-        # 构建页面URL
-        page_url = f"{project.base_url}{page.full_path}"
-        await send_log("info", f"🔗 访问页面: {page_url}")
+    # 尝试多种匹配方式，确保能找到录制数据
+    search_paths = [page.full_path]
+    if page.full_path.endswith('/') and len(page.full_path) > 1:
+        search_paths.append(page.full_path[:-1])
+    elif not page.full_path.endswith('/'):
+        search_paths.append(page.full_path + '/')
         
-        # 分析页面（内部会自动创建/关闭浏览器）
-        dom_data = await mcp.analyze_page(
-            url=page_url,
-            page_name=page.name,
-            timeout=15000
-        )
-        
-        if not dom_data:
-            await send_log("warning", "⚠️ analyze_page返回None，检查后端日志获取详细错误")
-            print(f"[生成用例] analyze_page返回None, URL: {page_url}", flush=True)
-        
-        if dom_data:
-            # 额外获取完整的DOM结构和CSS选择器
-            if mcp.context:
-                dom_page = await mcp.context.new_page()
-                await dom_page.goto(page_url, wait_until='domcontentloaded', timeout=10000)
-                
-                # 获取DOM结构
-                dom_structure = await dom_page.evaluate("""
-                    () => {
-                        const getAllElements = (element, depth = 0) => {
-                            if (depth > 5) return [];
-                            const result = [];
-                            const tag = element.tagName?.toLowerCase();
-                            if (!tag) return result;
-                            
-                            const id = element.id ? `#${element.id}` : '';
-                            const classes = element.className && typeof element.className === 'string' 
-                                ? `.${element.className.split(' ').filter(c => c).join('.')}` 
-                                : '';
-                            
-                            result.push({
-                                tag: tag + id + classes,
-                                text: element.childNodes.length === 1 && element.childNodes[0].nodeType === 3 
-                                    ? element.textContent.substring(0, 50) 
-                                    : '',
-                                children: []
-                            });
-                            
-                            for (const child of element.children) {
-                                result[result.length - 1].children.push(...getAllElements(child, depth + 1));
-                            }
-                            
-                            return result;
-                        };
-                        return getAllElements(document.body);
-                    }
-                """)
-                
-                # 获取CSS选择器
-                all_selectors = await dom_page.evaluate("""
-                    () => {
-                        const elements = [];
-                        const allEls = document.querySelectorAll('*');
-                        
-                        allEls.forEach((el, index) => {
-                            if (index > 200) return;
-                            
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width === 0 || rect.height === 0) return;
-                            
-                            let selector = el.tagName.toLowerCase();
-                            if (el.id) {
-                                selector += `#${el.id}`;
-                            } else if (el.className && typeof el.className === 'string') {
-                                const classes = el.className.split(' ').filter(c => c && !c.startsWith('ant'));
-                                if (classes.length > 0) {
-                                    selector += `.${classes.slice(0, 2).join('.')}`;
-                                }
-                            }
-                            
-                            elements.push({
-                                selector,
-                                tag: el.tagName.toLowerCase(),
-                                text: el.innerText?.substring(0, 100) || '',
-                                visible: true
-                            });
-                        });
-                        
-                        return elements;
-                    }
-                """)
-                
-                dom_data['dom_structure'] = dom_structure
-                dom_data['all_selectors'] = all_selectors
-                
-                await send_log("success", f"✅ DOM数据获取成功: {len(dom_data.get('interactive_elements', []))}个交互元素, {len(all_selectors)}个CSS选择器")
-            else:
-                await send_log("warning", "⚠️ DOM数据获取不完整")
-        else:
-            await send_log("error", "❌ 无法获取DOM数据，终止生成")
-            await send_log("info", "💡 请检查：1)前端是否运行 2)页面路径是否正确 3)查看后端日志获取详细错误")
-            return {"error": "DOM数据获取失败", "page_id": page_id}
-            
-    except Exception as e:
-        await send_log("error", f"❌ Playwright访问页面失败: {str(e)}")
-        await send_log("info", "💡 请检查：1)前端是否运行 2)页面路径是否正确 3)查看后端日志获取详细错误")
-        print(f"[生成用例] Playwright访问失败: {e}", flush=True)
-        return {"error": f"Playwright访问失败: {str(e)}", "page_id": page_id}
+    for p in search_paths:
+        recorded_page = session.discovered_pages.get(p)
+        if recorded_page and recorded_page.get('dom'):
+            await send_log("success", f"✅ 发现已录制的页面数据 (匹配路径: {p})")
+            dom_data = recorded_page['dom']
+            break
     
-    # 第二步：读取页面对应的Vue源代码
-    await send_log("info", "📂 正在读取页面源代码...")
+    if not dom_data:
+        # 兜底：如果还是没找到，尝试模糊匹配（忽略大小写和末尾斜杠）
+        normalized_path = page.full_path.lower().rstrip('/')
+        for route, data in session.discovered_pages.items():
+            if route.lower().rstrip('/') == normalized_path and data.get('dom'):
+                await send_log("success", f"✅ 模糊匹配成功: {route}")
+                dom_data = data['dom']
+                break
+    
+    if not dom_data:
+        await send_log("info", "🌐 录制会话中未找到该页面数据，尝试使用Playwright实时访问...")
+        # ... 后面保持不变 ...
+        mcp = PlaywrightMCPService(headless=True)
+        try:
+            # 构建页面URL
+            page_url = f"{project.base_url}{page.full_path}"
+            if not page_url.startswith(('http://', 'https://')):
+                page_url = f"http://{page_url}"
+                
+            await send_log("info", f"🔗 访问页面: {page_url}")
+            
+            # 分析页面
+            dom_data = await mcp.analyze_page(
+                url=page_url,
+                page_name=page.name,
+                timeout=15000
+            )
+            
+            if dom_data:
+                await send_log("success", f"✅ 实时获取DOM数据成功")
+        except Exception as e:
+            await send_log("error", f"❌ 实时获取DOM数据失败: {str(e)}")
+            
+    if not dom_data:
+        await send_log("error", "❌ 无法获取DOM数据，终止生成")
+        await send_log("info", "💡 请先通过'探索录制'访问该页面，或确保本地服务已启动")
+        return {"error": "DOM数据获取失败", "page_id": page_id}
+    
+    # 第二步：读取页面对应的Vue源代码及关联组件源码
+    await send_log("info", "📂 正在读取页面及关联组件源代码...")
     
     source_code = ""
-    if project.repo_path and page.file_path:
-        # 构建源代码文件路径
-        source_file_path = os.path.join(project.repo_path, page.file_path)
+    component_codes = []
+    
+    if project.repo_path:
+        # 1. 尝试获取主页面源码
+        current_file_path = page.file_path
         
-        if os.path.exists(source_file_path):
+        # 【增强】如果数据库里没有 file_path，尝试根据路径名动态搜索匹配的 Vue 文件
+        if not current_file_path:
+            await send_log("info", f"🔍 尝试自动搜索匹配的源码文件...")
+            from pathlib import Path
+            search_name = page.path.lower()
+            if search_name == '/': search_name = 'home' # 根路径特殊处理
+            
+            # 常见的 Vue 页面文件命名规范
+            patterns = [
+                f"**/{search_name}.vue",
+                f"**/{search_name}View.vue",
+                f"**/{search_name}Page.vue",
+                f"**/index.vue" # 如果是文件夹结构
+            ]
+            
+            repo_root = Path(project.repo_path)
+            matched_file = None
+            for pattern in patterns:
+                matches = list(repo_root.glob(pattern))
+                if matches:
+                    # 优先选择 views 或 pages 目录下的
+                    views_matches = [m for m in matches if 'views' in str(m) or 'pages' in str(m)]
+                    matched_file = views_matches[0] if views_matches else matches[0]
+                    break
+            
+            if matched_file:
+                current_file_path = str(matched_file.relative_to(repo_root)).replace('\\', '/')
+                await send_log("success", f"🎯 自动匹配到源码文件: {current_file_path}")
+        
+        if current_file_path:
+            source_file_path = os.path.join(project.repo_path, current_file_path)
+            if os.path.exists(source_file_path):
+                try:
+                    with open(source_file_path, 'r', encoding='utf-8') as f:
+                        source_code = f.read()
+                    await send_log("success", f"✅ 页面源代码读取成功: {len(source_code)} 字")
+                except Exception as e:
+                    await send_log("warning", f"⚠️ 页面源代码读取失败: {str(e)}")
+            else:
+                await send_log("warning", f"⚠️ 页面源代码文件不存在: {source_file_path}")
+        
+        # 2. 读取关联组件源码
+        from app.services.component_analyzer import analyze_components
+        all_components_info = await analyze_components(project.repo_path)
+        comp_registry = {c['name']: c['file_path'] for c in all_components_info.get('components', [])}
+        
+        # 获取该页面使用的组件名
+        used_component_names = []
+        # 从静态分析获取
+        if page.imported_components:
             try:
-                with open(source_file_path, 'r', encoding='utf-8') as f:
-                    source_code = f.read()
-                await send_log("success", f"✅ 源代码读取成功: {len(source_code)} 字")
-            except Exception as e:
-                await send_log("warning", f"⚠️ 源代码读取失败: {str(e)}")
-                print(f"[生成用例] 源代码读取失败: {e}", flush=True)
-        else:
-            await send_log("warning", f"⚠️ 源代码文件不存在: {source_file_path}")
-    elif not page.file_path:
-        await send_log("warning", "⚠️ 页面没有file_path信息，请重新刷新页面树")
+                imported = json.loads(page.imported_components)
+                if isinstance(imported, list):
+                    used_component_names.extend(imported)
+            except:
+                pass
+        
+        # 从DOM中进一步尝试提取组件名（简单的启发式：非标准HTML标签）
+        standard_tags = {'div', 'span', 'a', 'p', 'button', 'input', 'ul', 'li', 'h1', 'h2', 'h3', 'header', 'footer', 'main', 'section', 'form', 'label', 'img', 'svg', 'canvas'}
+        if dom_data and 'interactive_elements' in dom_data:
+            for el in dom_data['interactive_elements']:
+                tag = el.get('tag', '').lower()
+                if tag and tag not in standard_tags and '-' in tag: # 类似于 a-button, my-component
+                    # 尝试转换 a-button -> Button 这种匹配（简单处理）
+                    pass
+        
+        # 去重
+        used_component_names = list(set(used_component_names))
+        
+        if used_component_names:
+            await send_log("info", f"🧩 发现 {len(used_component_names)} 个关联组件，正在抓取源码...")
+            for comp_name in used_component_names:
+                if comp_name in comp_registry:
+                    comp_path = os.path.join(project.repo_path, comp_registry[comp_name])
+                    if os.path.exists(comp_path):
+                        try:
+                            with open(comp_path, 'r', encoding='utf-8') as f:
+                                comp_src = f.read()
+                            component_codes.append(f"### 组件: {comp_name} ({comp_registry[comp_name]})\n\n{comp_src}")
+                        except:
+                            pass
+            
+            if component_codes:
+                await send_log("success", f"✅ 已合并 {len(component_codes)} 个组件的源代码")
     else:
-        await send_log("warning", "⚠️ 项目代码路径未配置")
+        await send_log("warning", "⚠️ 项目代码路径未配置，无法读取源码")
     
     # 第三步：构建Prompt
     await send_log("info", "📝 正在构建Prompt...")
+    
+    # 构建组件代码上下文
+    component_context = ""
+    if component_codes:
+        component_context = "\n## 相关组件源代码\n\n" + "\n\n---\n\n".join(component_codes)
+    
+    # 构建DOM数据描述
     
     # 获取组件列表
     components = []
@@ -409,6 +438,8 @@ async def generate_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
 ## 源代码
 
 {source_code if source_code else '（源代码未提供）'}
+
+{component_context if component_context else ''}
 
 {dom_description if dom_description else '（DOM数据未提供）'}
 
@@ -564,7 +595,8 @@ async def get_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
     """获取页面下的所有用例（包括子页面）"""
     page = await db.get(TestPage, page_id)
     if not page:
-        raise HTTPException(404, "页面不存在")
+        # 如果页面不存在，返回空列表而不是抛出404，防止前端崩溃
+        return []
     
     # 获取该页面及所有子页面的 ID
     async def get_all_child_page_ids(parent_id: str) -> list[str]:

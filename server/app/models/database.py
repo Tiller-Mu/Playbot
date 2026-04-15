@@ -56,6 +56,7 @@ class TestPage(Base):
     page_comments = Column(Text, comment="页面级注释（文件顶部注释等）")
     component_comments = Column(Text, comment="组件级注释（JSON格式：{组件名: 注释内容}）")
     description = Column(Text, comment="页面功能描述（Markdown格式）")
+    is_captured = Column(Boolean, default=False, comment="是否已通过录制捕获真实DOM")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     project = relationship("Project", back_populates="pages")

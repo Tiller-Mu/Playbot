@@ -40,6 +40,7 @@ class TestPageOut(BaseModel):
     path: str
     full_path: str
     is_leaf: bool
+    is_captured: bool = False
     component_name: str | None
     children: list['TestPageOut'] = []
     case_count: int = 0

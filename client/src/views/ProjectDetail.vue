@@ -10,9 +10,11 @@ import {
   RightOutlined,
   FileOutlined,
   RobotOutlined,
+  VideoCameraOutlined,
 } from '@ant-design/icons-vue'
 import type { Project, TestPage } from '../types'
 import { projectApi, pageApi, generateApi } from '../services/api'
+import RecorderModal from '../components/RecorderModal.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -26,6 +28,11 @@ const treeLoading = ref(false)
 // 视图切换
 const treeViewMode = ref<'pages' | 'components'>('pages')  // 页面/组件切换
 const showLeftSidebar = ref(true)  // 左侧边栏是否展开
+
+// 录制相关
+const showRecorder = ref(false)  // 是否显示录制弹窗
+const showCoverageReport = ref(false)  // 是否显示覆盖率报告
+const coverageReport = ref<any>(null)  // 覆盖率报告数据
 
 // 组件相关
 const componentList = ref<any[]>([])  // 组件列表
@@ -74,15 +81,6 @@ const logLevelIcons: Record<string, string> = {
   debug: '🔍'
 }
 
-// MCP日志等级颜色
-const logLevelColors: Record<string, string> = {
-  info: '#1890ff',
-  success: '#52c41a',
-  warning: '#faad14',
-  error: '#ff4d4f',
-  debug: '#8c8c8c'
-}
-
 const activeTab = computed(() => {
   if (route.name === 'Executions') return 'executions'
   return 'cases'
@@ -100,11 +98,7 @@ async function loadProject() {
 }
 
 async function loadPageTree() {
-  if (!project.value?.repo_path) {
-    message.warning('请先拉取代码')
-    return
-  }
-  
+  // 移除硬性 repo_path 检查，允许在未拉取代码时查看录制页面
   treeLoading.value = true
   try {
     const res = await pageApi.getTree(projectId.value)
@@ -155,6 +149,20 @@ async function loadComponents() {
   } finally {
     treeLoading.value = false
   }
+}
+
+// 录制完成回调
+async function handleRecordingComplete(report: any) {
+  coverageReport.value = report
+  showCoverageReport.value = true
+  
+  // 确保数据已同步后刷新页面树
+  await loadPageTree()
+  
+  // 延迟再次刷新，防止后端异步写入延迟
+  setTimeout(async () => {
+    await loadPageTree()
+  }, 1000)
 }
 
 // 建立双向关联
@@ -229,7 +237,8 @@ function onMcpLogScroll() {
   const { scrollTop, scrollHeight, clientHeight } = mcpLogContainer.value
   const isAtBottom = scrollHeight - scrollTop - clientHeight < 50
   
-  // 如果滚动到底部，恢复自动滚动
+  // 如果当前在底部，则标记为未手动滚动（允许自动跟随）
+  // 如果离开底部，则标记为手动滚动（禁止自动跟随）
   userScrolled.value = !isAtBottom
 }
 
@@ -442,11 +451,9 @@ function connectMCPLogWebSocket(): Promise<void> {
       mcpLogWebSocket.value.close()
     }
     
-    // WebSocket应该连接到后端端口8001，而不是前端端口5173
-    // 使用当前API地址的端口
-    const apiBaseURL = 'http://localhost:8003/api'
-    const wsPort = apiBaseURL.match(/:(\d+)/)?.[1] || '8003'
-    const wsUrl = `ws://localhost:${wsPort}/ws/mcp/${projectId.value}`
+    // WebSocket应该连接到后端端口8004，而不是前端端口5173
+    // 使用当前环境一致的端口
+    const wsUrl = `ws://localhost:8004/ws/mcp/${projectId.value}`
     const ws = new WebSocket(wsUrl)
     
     ws.onopen = () => {
@@ -462,36 +469,10 @@ function connectMCPLogWebSocket(): Promise<void> {
           id: Date.now() + Math.random()
         })
         
-        // 自动滚动到底部
+        // 自动滚动到底部 (受 userScrolled 锁控制)
         scrollToBottom()
           
         // 从日志中提取组件关联信息
-        if (logEntry.data?.components && logEntry.data?.route) {
-          const route = logEntry.data.route
-          const components = logEntry.data.components
-          // 找到对应的页面
-          const page = pageTree.value.find(p => p.full_path === route || p.path === route)
-          if (page) {
-            pageComponents.value[page.id] = components
-            // 同时更新componentPages（组件→页面反向映射）
-            components.forEach((compName: string) => {
-              if (!componentPages.value[compName]) {
-                componentPages.value[compName] = []
-              }
-              if (!componentPages.value[compName].includes(page.name || route)) {
-                componentPages.value[compName].push(page.name || route)
-              }
-            })
-          }
-        }
-          
-        // 自动滚动到底部
-        nextTick(() => {
-          const logContainer = document.querySelector('.mcp-log-content')
-          if (logContainer) {
-            logContainer.scrollTop = logContainer.scrollHeight
-          }
-        })
       } catch (e) {
         console.error('解析MCP日志失败:', e)
       }
@@ -598,15 +579,37 @@ function switchTab(key: string) {
   }
 }
 
+// 过滤页面树：仅显示已录制的页面
+const capturedPages = computed(() => {
+  // 递归筛选出 is_captured 的叶子节点，或者包含 captured 节点的父节点
+  function filterCaptured(pages: TestPage[]): TestPage[] {
+    return pages
+      .map(p => ({ ...p }))
+      .filter(p => {
+        if (p.is_leaf) {
+          return p.is_captured
+        }
+        if (p.children) {
+          p.children = filterCaptured(p.children)
+          return p.children.length > 0
+        }
+        return false
+      })
+  }
+  return filterCaptured(pageTree.value)
+})
+
 // 将页面树转换为 a-tree 需要的数据格式
 function convertToTreeData(pages: TestPage[]): any[] {
   return pages.map(page => ({
     key: page.id,
-    title: page.name,
-    description: page.description || '',  // 保留description供面板使用
+    title: page.is_captured ? `📹 ${page.full_path}` : (page.name || page.path),
+    fullPath: page.full_path,
+    description: page.description || '',
     icon: page.is_leaf ? FileOutlined : RightOutlined,
     children: page.children ? convertToTreeData(page.children) : [],
     isLeaf: page.is_leaf,
+    isCaptured: page.is_captured,
   }))
 }
 
@@ -696,6 +699,16 @@ onUnmounted(() => {
       >
         <template #extra>
           <a-space>
+            <!-- 探索录制按钮 -->
+            <a-button 
+              type="primary" 
+              size="small"
+              @click="showRecorder = true"
+            >
+              <template #icon><VideoCameraOutlined /></template>
+              探索录制
+            </a-button>
+            
             <!-- 刷新页面树按钮 -->
             <a-button 
               type="text" 
@@ -729,13 +742,13 @@ onUnmounted(() => {
         
         <!-- 页面树模式 -->
         <div v-if="treeViewMode === 'pages'">
-          <div v-if="!project?.repo_path" style="padding: 20px; text-align: center; color: #999;">
-            请先拉取代码
+          <div v-if="capturedPages.length === 0" style="padding: 20px; text-align: center; color: #999;">
+            暂无录制页面，请点击上方“探索录制”
           </div>
           
           <a-tree
             v-else
-            :tree-data="convertToTreeData(pageTree)"
+            :tree-data="convertToTreeData(capturedPages)"
             :expanded-keys="treeExpandedKeys"
             @expand="(keys: string[]) => treeExpandedKeys = keys"
             @select="onPageSelect"
@@ -749,9 +762,13 @@ onUnmounted(() => {
               <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                 <span>{{ dataRef.title }}</span>
                 <div style="display: flex; gap: 4px;">
-                  <a-tag size="small" :color="dataRef.isLeaf ? 'blue' : 'green'">
-                    {{ dataRef.isLeaf ? `(${pageComponents[dataRef.key]?.length || 0})` : '📁' }}
-                  </a-tag>
+                  <!-- 显示组件数量 -->
+                  <a-badge 
+                    :count="pageComponents[dataRef.key]?.length || 0" 
+                    :number-style="{ backgroundColor: '#52c41a' }"
+                    size="small"
+                    title="关联组件数量"
+                  />
                   <a-button 
                     v-if="dataRef.isLeaf"
                     size="small" 
@@ -924,6 +941,96 @@ onUnmounted(() => {
         </div>
       </div>
     </a-drawer>
+    
+    <!-- 录制弹窗 -->
+    <RecorderModal 
+      v-model:open="showRecorder"
+      :project-id="project?.id"
+      @recording-complete="handleRecordingComplete"
+    />
+    
+    <!-- 覆盖率报告弹窗 -->
+    <a-modal
+      v-model:open="showCoverageReport"
+      title="📊 录制覆盖率分析"
+      :width="800"
+      :maskClosable="false"
+      :closable="false"
+      :footer="null"
+      @cancel="loadPageTree"
+    >
+      <a-result
+        v-if="coverageReport"
+        :status="coverageReport.coverage_rate >= 0.8 ? 'success' : 'warning'"
+        :title="`覆盖率 ${(coverageReport.coverage_rate * 100).toFixed(1)}%`"
+        :sub-title="`已录制 ${coverageReport.recorded_count} 个页面，遗漏 ${coverageReport.missed_count} 个页面`"
+      >
+        <template #extra>
+          <a-space>
+            <a-button type="primary" @click="showCoverageReport = false; showRecorder = true; loadPageTree()">
+              继续录制
+            </a-button>
+            <a-button @click="showCoverageReport = false; loadPageTree()">
+              确定
+            </a-button>
+          </a-space>
+        </template>
+      </a-result>
+
+      <!-- 遗漏页面列表 -->
+      <a-collapse v-if="coverageReport && coverageReport.missed_pages && coverageReport.missed_pages.length > 0">
+        <a-collapse-panel key="high" header="🔴 高优先级遗漏（建议录制）">
+          <a-list 
+            :data-source="coverageReport.missed_pages.filter((p: any) => p.priority === 'high')"
+            size="small"
+          >
+            <template #renderItem="{ item }">
+              <a-list-item>
+                <a-tag color="red">{{ item.type }}</a-tag>
+                {{ item.pattern }}
+              </a-list-item>
+            </template>
+          </a-list>
+        </a-collapse-panel>
+
+        <a-collapse-panel key="medium" header="🟡 中优先级遗漏（建议录制）">
+          <a-list 
+            :data-source="coverageReport.missed_pages.filter((p: any) => p.priority === 'medium')"
+            size="small"
+          >
+            <template #renderItem="{ item }">
+              <a-list-item>
+                <a-tag color="orange">{{ item.type }}</a-tag>
+                {{ item.pattern }}
+              </a-list-item>
+            </template>
+          </a-list>
+        </a-collapse-panel>
+
+        <a-collapse-panel key="low" header="🟢 低优先级遗漏（可选）">
+          <a-list 
+            :data-source="coverageReport.missed_pages.filter((p: any) => p.priority === 'low')"
+            size="small"
+          >
+            <template #renderItem="{ item }">
+              <a-list-item>
+                <a-tag color="green">{{ item.type }}</a-tag>
+                {{ item.pattern }}
+              </a-list-item>
+            </template>
+          </a-list>
+        </a-collapse-panel>
+      </a-collapse>
+      
+      <!-- 建议 -->
+      <a-alert
+        v-if="coverageReport && coverageReport.suggestions && coverageReport.suggestions.length > 0"
+        type="info"
+        :message="coverageReport.suggestions"
+        show-icon
+        style="margin-top: 16px"
+      />
+    </a-modal>
   </div>
 </template>
 

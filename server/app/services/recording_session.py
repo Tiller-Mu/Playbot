@@ -15,6 +15,7 @@ class RecordingSession:
     """录制会话状态管理"""
     
     def __init__(self, project_id: str):
+        print(f"[录制会话] 实例化新的会话对象: {project_id}", flush=True)
         self.project_id = project_id
         self.status = 'idle'  # idle | recording | paused | completed
         self.discovered_pages = {}  # {route_pattern: {urls: [], dom: None, components: []}}
@@ -47,6 +48,7 @@ class RecordingSession:
         
         def browser_thread():
             try:
+                print(f"[录制会话] 🚀 准备启动浏览器线程: {self.project_id}", flush=True)
                 logger.info("[录制会话] 🚀 启动浏览器...")
                 self._playwright = sync_playwright().start()
                 
@@ -60,6 +62,7 @@ class RecordingSession:
                     ]
                 )
                 
+                print("[录制会话] ✅ 浏览器进程已启动", flush=True)
                 logger.info("[录制会话] ✅ 浏览器进程启动成功")
                 
                 # 创建浏览器上下文（不设置固定viewport，使用浏览器窗口大小）
@@ -72,45 +75,120 @@ class RecordingSession:
                 
                 # 创建页面
                 self.page = self.context.new_page()
+                print("[录制会话] ✅ 浏览器页面已创建", flush=True)
                 logger.info("[录制会话] ✅ 浏览器页面创建成功")
                 
                 # 监听导航事件
                 self.page.on('framenavigated', self._on_navigation)
                 
+                # 监听URL变化（支持SPA前端路由）
+                self.page.on('load', self._on_page_load)
+                
+                print("[录制会话] 📡 已注册页面导航监听器", flush=True)
+                logger.info("[录制会话] 已注册页面导航监听器（支持SPA）")
+                
+                # 确保 base_url 有协议头
+                if self._browser_base_url and not self._browser_base_url.startswith(('http://', 'https://')):
+                    self._browser_base_url = f"http://{self._browser_base_url}"
+                
                 # 打开起始页面
                 if self._browser_base_url:
+                    print(f"[录制会话] 🌐 正在访问起始页面: {self._browser_base_url}", flush=True)
                     logger.info(f"[录制会话] 🌐 访问起始页面: {self._browser_base_url}")
                     try:
                         # 使用domcontentloaded更快启动
                         self.page.goto(
                             self._browser_base_url, 
-                            wait_until='domcontentloaded',
+                            wait_until='load',  # 改为 load 确保页面更完整
                             timeout=30000
                         )
+                        print(f"[录制会话] ✅ 起始页面已加载", flush=True)
                         logger.info(f"[录制会话] ✅ 起始页面加载完成")
                     except Exception as e:
+                        print(f"[录制会话] ⚠️ 起始页面加载超时或失败: {e}", flush=True)
                         logger.warning(f"[录制会话] ⚠️ 起始页面加载超时或失败: {e}")
-                        # 继续执行，不阻塞录制
                 
-                logger.info("[录制会话] ✅ 浏览器启动成功，等待用户操作...")
-                logger.info("[录制会话] 💡 提示：请在打开的浏览器窗口中访问页面，系统会自动记录")
+                print("[录制会话] ✅ 浏览器就绪，进入主动监控循环...", flush=True)
                 
-                # 保持浏览器线程运行
-                import time
-                while self.browser and not self.browser.is_closed():
-                    time.sleep(1)
+                # 记录上次捕获的 DOM 长度，用于支持 Tab/Modal 变化
+                last_dom_fingerprint = {} # {url: length}
                 
+                while self.browser and self.browser.is_connected():
+                    try:
+                        # 遍历所有打开的页面（支持多标签页）
+                        pages = [p for p in self.context.pages if not p.is_closed()]
+                        for p in pages:
+                            current_url = p.url
+                            if not current_url.startswith('http'):
+                                continue
+                                
+                            route_pattern = self._normalize_url(current_url)
+                            
+                            # 触发捕获的两个条件：
+                            # 1. URL 发生了变化
+                            # 2. 页面内容发生了重大变化 (即使 URL 没变)
+                            try:
+                                # 只有当页面处于 idle 状态且可交互时才抓取，避免频繁 evaluate 导致的性能问题
+                                # 我们这里直接尝试抓取长度
+                                dom_len = p.evaluate('() => document.documentElement.outerHTML.length')
+                                
+                                is_new_url = current_url != last_url
+                                old_len = last_dom_fingerprint.get(current_url, 0)
+                                is_content_changed = abs(dom_len - old_len) > 500
+                                
+                                if is_new_url or is_content_changed:
+                                    # 更新当前的活跃页面对象供其他方法使用
+                                    self.page = p
+                                    
+                                    if is_new_url:
+                                        print(f"[录制会话] 🚀 路径切换: {current_url}", flush=True)
+                                        last_url = current_url
+                                    
+                                    # 抓取并保存
+                                    self._check_and_capture(current_url)
+                                    last_dom_fingerprint[current_url] = dom_len
+                            except:
+                                continue
+                                
+                    except Exception:
+                        pass
+                    
+                    time.sleep(0.5) # 稍微放慢轮询，减轻 CPU 压力
+                
+                print("[录制会话] 🔴 浏览器连接已断开", flush=True)
                 logger.info("[录制会话] 浏览器窗口已关闭")
                 
             except Exception as e:
+                print(f"[录制会话] ❌ 浏览器线程发生崩溃: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
                 logger.error(f"[录制会话] ❌ 浏览器启动失败: {e}", exc_info=True)
         
         self._browser_thread = threading.Thread(target=browser_thread, daemon=True)
         self._browser_thread.start()
         
-        # 等待浏览器启动
-        time.sleep(3)
+        # 移除了主线程的 time.sleep(3)，防止 API 挂起
+        print(f"[录制会话] 线程已启动，API 准备返回", flush=True)
     
+    def _check_and_capture(self, url: str):
+        """检查并捕获当前页面（带简单的去重逻辑，避免过度 evaluate）"""
+        # 规范化 URL
+        route_pattern = self._normalize_url(url)
+        
+        # 如果是新路由，或者是虽然记录过但还没抓取过 DOM 的路由
+        if route_pattern not in self.discovered_pages or self.discovered_pages[route_pattern]['dom'] is None:
+            try:
+                # 稍微等待稳定
+                import time
+                time.sleep(0.5)
+                
+                dom = self.page.evaluate('() => document.documentElement.outerHTML')
+                if dom and len(dom) > 100:
+                    self.add_page(url, {'html': dom, 'url': url})
+                    print(f"[录制会话] 🤖 自动捕获成功: {route_pattern}", flush=True)
+            except:
+                pass
+
     def _on_navigation(self, frame):
         """页面导航回调 - 在浏览器线程中直接捕获DOM"""
         if self.status != 'recording':
@@ -146,6 +224,32 @@ class RecordingSession:
                 logger.warning(f"[录制会话] ⚠️ DOM为空或太短: {url}")
         except Exception as e:
             logger.error(f"[录制会话] ❌ DOM捕获失败 {url}: {e}")
+    
+    def _on_page_load(self, page):
+        """页面加载完成回调（用于SPA）"""
+        if self.status != 'recording':
+            return
+        
+        try:
+            url = page.url
+            
+            # 过滤非HTTP URL
+            if not url.startswith('http'):
+                return
+            
+            logger.info(f"[录制会话] 📄 页面加载: {url}")
+            
+            # 等待并捕获DOM
+            import time
+            time.sleep(0.5)
+            
+            dom = self.page.evaluate('() => document.documentElement.outerHTML')
+            
+            if dom and len(dom) > 100:
+                self.add_page(url, {'html': dom, 'url': url})
+                logger.info(f"[录制会话] ✅ DOM捕获成功: {len(dom)} 字符, URL: {url}")
+        except Exception as e:
+            logger.error(f"[录制会话] ❌ 页面加载捕获失败: {e}")
     
     def stop_browser(self):
         """关闭浏览器"""
@@ -192,6 +296,8 @@ class RecordingSession:
         if self.start_time:
             self.total_duration += (time.time() - self.start_time)
             self.start_time = None
+        
+        # 保存最终状态
         self._save()
         
         # 关闭浏览器
@@ -200,26 +306,95 @@ class RecordingSession:
         logger.info(f"[录制会话] 停止录制: {self.project_id}, 总时长: {self.total_duration:.1f}秒")
     
     def add_page(self, url: str, dom_data: dict):
-        """添加页面（自动去重）"""
+        """添加页面（自动去重与智能更新）"""
         route_pattern = self._normalize_url(url)
+        new_dom_len = len(dom_data.get('html', ''))
         
         if route_pattern not in self.discovered_pages:
+            # 1. 发现新页面
             self.discovered_pages[route_pattern] = {
                 'pattern': route_pattern,
                 'urls': [],
                 'dom': dom_data,
                 'components': [],
-                'first_visit': time.time()
+                'first_visit': time.time(),
+                'last_dom_len': new_dom_len
             }
-            logger.info(f"[录制会话] 发现新页面: {route_pattern}")
+            print(f"[录制会话] ✨ 发现并保存新页面: {route_pattern}", flush=True)
+            self._save()
+            self._show_browser_notification(f"✨ 发现新页面: {route_pattern}")
         else:
-            # 去重：只记录一次DOM
-            if self.discovered_pages[route_pattern]['dom'] is None:
-                self.discovered_pages[route_pattern]['dom'] = dom_data
-            logger.debug(f"[录制会话] 重复访问页面: {route_pattern}")
+            # 2. 路径已存在，检查是否需要更新 DOM (例如点开了 Tab 或弹窗)
+            old_page = self.discovered_pages[route_pattern]
+            old_dom_len = old_page.get('last_dom_len', 0)
+            
+            # 如果新抓取的 DOM 长度显著增加（比如点开了内容），或者之前没抓到 DOM
+            if old_page['dom'] is None or new_dom_len > (old_dom_len + 500):
+                old_page['dom'] = dom_data
+                old_page['last_dom_len'] = new_dom_len
+                self._save()
+                print(f"[录制会话] 🔄 更新页面快照 (检测到新内容): {route_pattern}", flush=True)
+                self._show_browser_notification(f"✅ 页面快照已更新 (捕获到新交互内容)")
+            else:
+                logger.debug(f"[录制会话] 重复访问且内容无显著变化: {route_pattern}")
         
         # 记录访问历史
         self.discovered_pages[route_pattern]['urls'].append(url)
+
+    def _show_browser_notification(self, message: str, color: str = "#52c41a"):
+        """在录制浏览器中显示一个高度兼容的悬浮提示"""
+        if not self.page:
+            return
+        try:
+            # 修正：Playwright evaluate 只接受一个参数，我们将参数打包成列表
+            self.page.evaluate("""
+                (args) => {
+                    const msg = args[0];
+                    const bgColor = args[1];
+                    console.log('[Playbot] ' + msg);
+                    const id = 'playbot-notification-box';
+                    let el = document.getElementById(id);
+                    if (el) el.remove();
+                    
+                    el = document.createElement('div');
+                    el.id = id;
+                    el.textContent = msg;
+                    
+                    // 极致稳健的样式设置
+                    Object.assign(el.style, {
+                        position: 'fixed',
+                        top: '10px',
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        padding: '10px 24px',
+                        backgroundColor: bgColor,
+                        color: 'white',
+                        borderRadius: '6px',
+                        zIndex: '2147483647',
+                        fontWeight: 'bold',
+                        boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
+                        pointerEvents: 'none',
+                        transition: 'opacity 0.4s ease',
+                        fontFamily: 'system-ui, -apple-system, sans-serif',
+                        fontSize: '15px',
+                        lineHeight: '1.4',
+                        textAlign: 'center',
+                        minWidth: '250px'
+                    });
+                    
+                    document.documentElement.appendChild(el);
+                    
+                    setTimeout(() => {
+                        if (el) {
+                            el.style.opacity = '0';
+                            setTimeout(() => { if (el && el.parentNode) el.remove(); }, 400);
+                        }
+                    }, 2500);
+                }
+            """, [message, color]) # 参数打包
+        except Exception as e:
+            # 记录错误但不中断流程
+            logger.warning(f"[录制会话] 注入通知失败: {e}")
     
     def _normalize_url(self, url: str) -> str:
         """URL规范化（去参数、替换ID）"""
@@ -235,16 +410,19 @@ class RecordingSession:
         # 移除哈希
         url = url.split('#')[0]
         
-        # 替换数字ID为:id
-        url = re.sub(r'/\d+', '/:id', url)
-        
-        # 替换UUID为:id
-        uuid_pattern = r'/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        url = re.sub(uuid_pattern, '/:id', url, flags=re.IGNORECASE)
-        
+        # 暂时关闭激进的 ID 转换，以观察真实路径匹配情况
+        # url = re.sub(r'/\d+', '/:id', url)
+        # uuid_pattern = r'/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        # url = re.sub(uuid_pattern, '/:id', url, flags=re.IGNORECASE)
+
         # 确保以/开头
         if not url.startswith('/'):
             url = '/' + url
+
+            
+        # 移除末尾斜杠（如果是根路径 / 则保留）
+        if len(url) > 1 and url.endswith('/'):
+            url = url[:-1]
         
         return url
     

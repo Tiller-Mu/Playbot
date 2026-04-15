@@ -1,7 +1,7 @@
 import axios from 'axios'
 import type { Project, TestCase, Execution, ExecutionDetail, LLMSettings, TestPage } from '../types'
 
-const api = axios.create({ baseURL: 'http://localhost:8003/api' })
+const api = axios.create({ baseURL: 'http://localhost:8004/api' })
 
 // ---- Project ----
 export const projectApi = {
@@ -80,4 +80,20 @@ export const settingsApi = {
   updateLLM: (data: LLMSettings) => api.put<LLMSettings>('/settings/llm', data).then(r => r.data),
   verifyLLM: (data: { llm_endpoint: string; llm_api_key: string; llm_model: string }) => 
     api.post<{ success: boolean; message: string; model: string; interaction_log: any[] }>('/settings/llm/verify', data).then(r => r.data),
+}
+
+// ---- Recording ----
+export const recordingApi = {
+  start: (projectId: string) =>
+    api.post<{ message: string; status: string; discovered_count: number }>(`/recording/${projectId}/start`).then(r => r.data),
+  pause: (projectId: string) =>
+    api.post<{ message: string; status: string; discovered_count: number }>(`/recording/${projectId}/pause`).then(r => r.data),
+  stop: (projectId: string) =>
+    api.post<{ message: string; status: string; report: any }>(`/recording/${projectId}/stop`).then(r => r.data),
+  getStatus: (projectId: string) =>
+    api.get<{ status: string; discovered_count: number; discovered_pages: string[]; duration: number }>(`/recording/${projectId}/status`).then(r => r.data),
+  capture: (projectId: string, url: string) =>
+    api.post<{ message: string; route_pattern: string; total_discovered: number }>(`/recording/${projectId}/capture`, { url }).then(r => r.data),
+  clearSession: (projectId: string) =>
+    api.delete<{ message: string }>(`/recording/${projectId}/session`).then(r => r.data),
 }
