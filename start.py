@@ -34,7 +34,7 @@ def start_backend():
     print("=" * 60)
     
     server_dir = Path(__file__).parent / "server"
-    port = 8003
+    port = 8004
     
     # 检查并清理端口
     print(f"\n📡 检查端口 {port}...")
@@ -48,11 +48,11 @@ def start_backend():
         kill_process_by_port(port)
         time.sleep(1)
     
-    # 使用Python 3.10启动后端（避免Python 3.14的asyncio subprocess问题）
-    print(f"   ✓ 启动后端服务 (端口: {port}, Python 3.10)")
+    # 使用Python 3.14启动后端
+    print(f"   ✓ 启动后端服务 (端口: {port}, Python 3.14)")
     
-    # 使用cmd /c来执行py命令
-    cmd = f'py -3.10 -m uvicorn app.main:app --reload --port {port}'
+    # 使用python命令（py命令可能失效）
+    cmd = f'python -m uvicorn app.main:app --reload --port {port}'
     
     # 使用start命令确保弹出新窗口
     subprocess.Popen(
@@ -105,7 +105,7 @@ def main():
     print("=" * 60)
     print("\n📋 启动计划:")
     print("   1. 后端服务 (FastAPI + Uvicorn)")
-    print("      - 地址: http://localhost:8003")
+    print("      - 地址: http://localhost:8004")
     print("      - 特性: 自动热更新")
     print("   2. 前端服务 (Vue3 + Vite)")
     print("      - 地址: http://localhost:5173")
@@ -130,8 +130,8 @@ def main():
         print("=" * 60)
         print("\n🌐 访问地址:")
         print("   • 前端: http://localhost:5173")
-        print("   • 后端API: http://localhost:8003")
-        print("   • API文档: http://localhost:8003/docs")
+        print("   • 后端API: http://localhost:8004")
+        print("   • API文档: http://localhost:8004/docs")
         print("\n💡 提示:")
         print("   • 两个服务分别在独立的控制台窗口运行")
         print("   • 关闭窗口即可停止对应服务")

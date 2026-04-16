@@ -1,10 +1,21 @@
-from openai import AsyncOpenAI
 import logging
 import asyncio
+import os
 
 from app.core.config import settings
 from app.models.database import async_session, AppSettings
 from sqlalchemy import select
+
+# 根据配置动态引入 OpenAI 客户端以支持自动追踪
+if settings.langfuse_enabled and settings.langfuse_public_key and settings.langfuse_secret_key:
+    os.environ["LANGFUSE_PUBLIC_KEY"] = settings.langfuse_public_key
+    os.environ["LANGFUSE_SECRET_KEY"] = settings.langfuse_secret_key
+    if settings.langfuse_host:
+        os.environ["LANGFUSE_HOST"] = settings.langfuse_host
+        
+    from langfuse.openai import AsyncOpenAI
+else:
+    from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 

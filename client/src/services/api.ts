@@ -30,6 +30,21 @@ export const pageApi = {
   // MCP生成用例
   mcpGenerateCases: (pageId: string) => 
     api.post<TestCase[]>(`/pages/${pageId}/generate`).then(r => r.data),
+  // 智能体生成用例（LangGraph）
+  generateWithAgent: (pageId: string) => 
+    api.post<{
+      status: string;
+      page_id: string;
+      page_path: string;
+      generated_count: number;
+      test_cases: TestCase[];
+      analysis: {
+        code: string;
+        dom: string;
+        strategy: string;
+      };
+      logs: { level: string; message: string; time: string }[];
+    }>(`/pages/${pageId}/generate-agent`).then(r => r.data),
 }
 
 // ---- TestCase ----

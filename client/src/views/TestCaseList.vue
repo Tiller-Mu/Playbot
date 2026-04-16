@@ -13,6 +13,7 @@ import {
 import type { TestCase } from '../types'
 import { testcaseApi, executeApi, pageApi } from '../services/api'
 
+const emit = defineEmits(['open-mcp-log', 'clear-mcp-log', 'set-mcp-running'])
 const route = useRoute()
 const router = useRouter()
 const projectId = computed(() => route.params.id as string)
@@ -25,7 +26,23 @@ const selectedIds = ref<string[]>([])
 const executing = ref(false)
 const generating = ref(false)
 const mcpGenerating = ref(false)
+const agentGenerating = ref(false)  // 智能体生成状态
 const selectedPageIds = ref<string[]>([])  // 从ProjectDetail传入的选中页面
+
+// 智能体生成结果
+const showAgentResult = ref(false)
+const agentResult = ref<{
+  page_path: string;
+  generated_count: number;
+  test_cases: TestCase[];
+  analysis: {
+    code: string;
+    dom: string;
+    strategy: string;
+  };
+  logs: { level: string; message: string; time: string }[];
+} | null>(null)
+const activeAgentTab = ref('cases')  // cases | analysis | logs
 
 // New case modal
 const showNewModal = ref(false)
@@ -101,6 +118,39 @@ async function handleMCPGenerate() {
     message.error(e.response?.data?.detail || 'MCP用例生成失败')
   } finally {
     mcpGenerating.value = false
+  }
+}
+
+// 智能体生成用例（LangGraph）
+async function handleAgentGenerate() {
+  if (selectedPageIds.value.length === 0) {
+    message.warning('请先在左侧勾选一个或多个页面')
+    return
+  }
+  
+  if (selectedPageIds.value.length > 1) {
+    message.info('智能体生成暂只支持单页面，将使用第一个选中的页面')
+  }
+  
+  agentGenerating.value = true
+  emit('clear-mcp-log')
+  emit('open-mcp-log')
+  emit('set-mcp-running', true)
+  
+  try {
+    const pid = selectedPageIds.value[0]
+    const result = await pageApi.generateWithAgent(pid)
+    
+    agentResult.value = result
+    showAgentResult.value = true
+    
+    message.success(`智能体生成完成！共 ${result.generated_count} 个用例`)
+    await loadCases()
+  } catch (e: any) {
+    message.error(e.response?.data?.detail || '智能体生成失败')
+  } finally {
+    agentGenerating.value = false
+    emit('set-mcp-running', false)
   }
 }
 
@@ -226,6 +276,16 @@ onMounted(loadCases)
       <a-space>
         <a-button 
           type="primary" 
+          @click="handleAgentGenerate" 
+          :loading="agentGenerating"
+          :disabled="selectedPageIds.length === 0"
+          danger
+        >
+          <RobotOutlined /> 
+          {{ selectedPageIds.length > 0 ? `🤖 智能体生成 (${selectedPageIds.length})` : '🤖 智能体生成' }}
+        </a-button>
+        <a-button 
+          type="primary" 
           @click="handleMCPGenerate" 
           :loading="mcpGenerating"
           :disabled="selectedPageIds.length === 0"
@@ -290,6 +350,61 @@ onMounted(loadCases)
           <a-tag color="blue">当前选中的页面</a-tag>
         </a-form-item>
       </a-form>
+    </a-modal>
+
+    <!-- 智能体生成结果弹窗 -->
+    <a-modal
+      v-model:open="showAgentResult"
+      title="🤖 智能体生成结果"
+      width="900px"
+      :footer="null"
+    >
+      <div v-if="agentResult">
+        <a-alert
+          :message="`页面: ${agentResult.page_path} | 生成用例: ${agentResult.generated_count} 个`"
+          type="success"
+          show-icon
+          style="margin-bottom: 16px;"
+        />
+        
+        <a-tabs v-model:activeKey="activeAgentTab">
+          <!-- 生成的用例 -->
+          <a-tab-pane key="cases" tab="生成的用例">
+            <a-list :data-source="agentResult.test_cases" bordered>
+              <template #renderItem="{ item, index }">
+                <a-list-item>
+                  <a-list-item-meta
+                    :title="`${index + 1}. ${item.title}`"
+                    :description="item.description"
+                  />
+                  <a-button 
+                    type="link" 
+                    size="small"
+                    @click="router.push(`/testcase/${item.id}`)"
+                  >
+                    查看代码
+                  </a-button>
+                </a-list-item>
+              </template>
+            </a-list>
+          </a-tab-pane>
+          
+          <!-- 分析过程 -->
+          <a-tab-pane key="analysis" tab="分析过程">
+            <a-collapse>
+              <a-collapse-panel key="strategy" header="测试策略">
+                <pre style="white-space: pre-wrap; font-size: 12px;">{{ agentResult.analysis.strategy }}</pre>
+              </a-collapse-panel>
+              <a-collapse-panel key="code" header="代码分析">
+                <pre style="white-space: pre-wrap; font-size: 12px;">{{ agentResult.analysis.code }}</pre>
+              </a-collapse-panel>
+              <a-collapse-panel key="dom" header="DOM分析">
+                <pre style="white-space: pre-wrap; font-size: 12px;">{{ agentResult.analysis.dom }}</pre>
+              </a-collapse-panel>
+            </a-collapse>
+          </a-tab-pane>
+        </a-tabs>
+      </div>
     </a-modal>
   </div>
 </template>

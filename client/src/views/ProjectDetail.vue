@@ -464,6 +464,18 @@ function connectMCPLogWebSocket(): Promise<void> {
     ws.onmessage = (event) => {
       try {
         const logEntry = JSON.parse(event.data)
+        
+        // 【优化】如果是流式内容(stream)，尝试合并到最后一条，防止大量换行和碎片化
+        if (logEntry.level === 'stream' && mcpLogs.value.length > 0) {
+          const lastLog = mcpLogs.value[mcpLogs.value.length - 1]
+          if (lastLog.level === 'stream') {
+            // 因为后端发送的是累计buffer，所以这里直接覆盖即可实现平滑增长
+            lastLog.message = logEntry.message
+            scrollToBottom()
+            return
+          }
+        }
+
         mcpLogs.value.push({
           ...logEntry,
           id: Date.now() + Math.random()
@@ -587,7 +599,7 @@ const capturedPages = computed(() => {
       .map(p => ({ ...p }))
       .filter(p => {
         if (p.is_leaf) {
-          return p.is_captured
+          return (p as any).is_captured
         }
         if (p.children) {
           p.children = filterCaptured(p.children)
@@ -603,13 +615,13 @@ const capturedPages = computed(() => {
 function convertToTreeData(pages: TestPage[]): any[] {
   return pages.map(page => ({
     key: page.id,
-    title: page.is_captured ? `📹 ${page.full_path}` : (page.name || page.path),
+    title: (page as any).is_captured ? `📹 ${page.full_path}` : (page.name || page.path),
     fullPath: page.full_path,
     description: page.description || '',
     icon: page.is_leaf ? FileOutlined : RightOutlined,
     children: page.children ? convertToTreeData(page.children) : [],
     isLeaf: page.is_leaf,
-    isCaptured: page.is_captured,
+    isCaptured: (page as any).is_captured,
   }))
 }
 
@@ -881,7 +893,12 @@ onUnmounted(() => {
         </a-tabs>
 
         <div style="padding: 16px;">
-          <router-view :key="route.fullPath" />
+          <router-view 
+            :key="route.fullPath" 
+            @open-mcp-log="showMCPLog = true" 
+            @clear-mcp-log="clearMCPLogs" 
+            @set-mcp-running="mcpIsRunning = $event" 
+          />
         </div>
       </a-card>
     </div>

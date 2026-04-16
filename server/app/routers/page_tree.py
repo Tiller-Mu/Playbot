@@ -1,13 +1,14 @@
 """页面树管理 API 路由。"""
 import json
+import os
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.database import TestPage, TestCase, Project, get_db
 from app.schemas.schemas import TestPageOut, TestCaseOut
 from app.services.page_analyzer import extract_page_tree
-from app.services.llm_service import llm_chat
 
 router = APIRouter(prefix="/api/pages", tags=["pages"])
 
@@ -24,21 +25,24 @@ def build_tree_response(pages: list[TestPage], case_counts: dict[str, int]) -> l
         
         # 1. 优先使用 imported_components（从页面源码静态分析得到）
         if hasattr(page, 'imported_components') and page.imported_components:
-            components = page.imported_components
-        # 2. 其次使用 component_name（从 MCP 分析或数据库得到）
+            try:
+                if isinstance(page.imported_components, str):
+                    components = json.loads(page.imported_components)
+                else:
+                    components = page.imported_components
+            except:
+                components = []
+        # 2. 其次使用 component_name
         elif page.component_name:
             try:
-                # 尝试解析JSON
                 if isinstance(page.component_name, str):
                     if page.component_name.startswith('['):
                         components = json.loads(page.component_name)
                     else:
-                        # 逗号分隔的字符串
                         components = [c.strip() for c in page.component_name.split(',') if c.strip()]
                 elif isinstance(page.component_name, list):
                     components = page.component_name
             except:
-                # 解析失败，当作单个组件名
                 components = [page.component_name] if page.component_name else []
         
         node = {
@@ -49,10 +53,11 @@ def build_tree_response(pages: list[TestPage], case_counts: dict[str, int]) -> l
             "path": page.path,
             "full_path": page.full_path,
             "is_leaf": page.is_leaf,
+            "file_path": page.file_path,
             "component_name": page.component_name,
             "components": components,  # 组件列表
             "page_comments": page.page_comments or "",  # 页面注释
-            "component_comments": page.component_comments or "",  # 组件注释（JSON字符串）
+            "component_comments": page.component_comments or "",  # 组件注释
             "description": page.description or "",
             "is_captured": page.is_captured or False,  # 是否已录制
             "children": [],
@@ -75,7 +80,6 @@ def build_tree_response(pages: list[TestPage], case_counts: dict[str, int]) -> l
 @router.get("/{project_id}")
 async def get_page_tree(project_id: str, db: AsyncSession = Depends(get_db)):
     """获取项目的页面树"""
-    # 查询所有页面
     result = await db.execute(
         select(TestPage)
         .where(TestPage.project_id == project_id)
@@ -83,7 +87,6 @@ async def get_page_tree(project_id: str, db: AsyncSession = Depends(get_db)):
     )
     pages = result.scalars().all()
     
-    # 统计每个页面的用例数
     case_count_result = await db.execute(
         select(TestPage.id, func.count(TestCase.id))
         .outerjoin(TestCase, TestPage.id == TestCase.page_id)
@@ -92,57 +95,32 @@ async def get_page_tree(project_id: str, db: AsyncSession = Depends(get_db)):
     )
     case_counts = {row[0]: row[1] for row in case_count_result.all()}
     
-    # 构建树形结构
     tree = build_tree_response(list(pages), case_counts)
-    
     return {"pages": tree, "total_cases": sum(case_counts.values())}
 
 
 @router.post("/{project_id}/refresh")
 async def refresh_page_tree(project_id: str, db: AsyncSession = Depends(get_db)):
     """重新分析代码生成页面树"""
-    # 检查项目是否存在
     project = await db.get(Project, project_id)
-    if not project:
-        raise HTTPException(404, "项目不存在")
+    if not project or not project.repo_path:
+        raise HTTPException(400, "项目不存在或未拉取代码")
     
-    if not project.repo_path:
-        raise HTTPException(400, "请先拉取项目代码")
-    
-    # 分析页面树
     tree_data = await extract_page_tree(project.repo_path)
-    
     if not tree_data:
         return {"pages": [], "total_cases": 0, "message": "未检测到页面文件"}
     
-    # 清空旧的页面树（保留用例，page_id 设为 NULL）
-    await db.execute(
-        update(TestCase)
-        .where(TestCase.project_id == project_id)
-        .values(page_id=None)
-    )
-    
-    old_pages_result = await db.execute(
-        select(TestPage.id).where(TestPage.project_id == project_id)
-    )
-    old_page_ids = [row[0] for row in old_pages_result.all()]
-    
-    for page_id in old_page_ids:
-        old_page = await db.get(TestPage, page_id)
-        if old_page:
-            await db.delete(old_page)
-    
+    # 清空旧数据
+    await db.execute(update(TestCase).where(TestCase.project_id == project_id).values(page_id=None))
+    old_pages_result = await db.execute(select(TestPage.id).where(TestPage.project_id == project_id))
+    for pid in [row[0] for row in old_pages_result.all()]:
+        op = await db.get(TestPage, pid)
+        if op: await db.delete(op)
     await db.commit()
     
-    # 保存新的页面树
     async def save_tree(nodes: list[dict], parent_id: str | None = None):
-        saved_pages = []
         for node in nodes:
-            # 保存静态分析的数据
-            imported_components = node.get("imported_components", [])
-            page_comments = node.get("page_comments", "")
-            component_comments = node.get("component_comments", {})
-            
+            imported = node.get("imported_components", [])
             page = TestPage(
                 project_id=project_id,
                 parent_id=parent_id,
@@ -150,479 +128,458 @@ async def refresh_page_tree(project_id: str, db: AsyncSession = Depends(get_db))
                 path=node.get("path", ""),
                 full_path=node.get("full_path", ""),
                 is_leaf=node.get("is_leaf", False),
-                file_path=node.get("file_path", ""),  # 保存源代码文件路径
+                file_path=node.get("file_path", ""),
                 component_name=node.get("component"),
-                imported_components=json.dumps(imported_components, ensure_ascii=False) if imported_components else None,
-                page_comments=page_comments if page_comments else None,
-                component_comments=json.dumps(component_comments, ensure_ascii=False) if component_comments else None,
+                imported_components=json.dumps(imported, ensure_ascii=False) if imported else None,
+                page_comments=node.get("page_comments"),
+                component_comments=json.dumps(node.get("component_comments", {}), ensure_ascii=False) if node.get("component_comments") else None,
             )
             db.add(page)
-            saved_pages.append(page)
-            
-            # 递归保存子节点
-            children = node.get("children")
-            if children:
-                child_pages = await save_tree(children, page.id)
-                saved_pages.extend(child_pages)
-        
-        return saved_pages
+            await db.flush() # 获取ID
+            if node.get("children"):
+                await save_tree(node["children"], page.id)
     
     await save_tree(tree_data)
     await db.commit()
-    
-    # 返回新的页面树
-    result = await db.execute(
-        select(TestPage)
-        .where(TestPage.project_id == project_id)
-        .order_by(TestPage.full_path)
-    )
-    pages = result.scalars().all()
-    
-    case_counts = {}  # 新页面树还没有用例
-    tree = build_tree_response(list(pages), case_counts)
-    
-    return {"pages": tree, "total_cases": 0, "message": f"成功分析 {len(pages)} 个页面节点"}
+    return await get_page_tree(project_id, db)
 
 
 @router.post("/{page_id}/generate")
 async def generate_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
-    """为指定页面生成测试用例（使用DOM数据 + 源代码）"""
+    """为指定页面生成测试用例（使用DOM数据 + 源代码 + 优化Prompt）"""
+    import re
+    import json
+    import os
+    import traceback
+    from pathlib import Path
+    from datetime import datetime
     from app.services.llm_service import llm_chat_stream
     from app.core.websocket import ws_manager
     from app.services.mcp_log_service import mcp_log_service
     from app.services.playwright_mcp import PlaywrightMCPService
-    import traceback
-    import os
     
+    page = await db.get(TestPage, page_id)
+    project = await db.get(Project, page.project_id) if page else None
+    if not page or not project: raise HTTPException(404, "页面或项目不存在")
+    
+    async def send_log(level: str, message: str):
+        await ws_manager.broadcast({"type": "log", "level": level, "message": message, "timestamp": datetime.now().isoformat()}, channel=f"mcp_{project.id}")
+        mcp_log_service.log(project.id, level, message)
+    
+    await send_log("info", f"🔍 开始为页面生成专家级用例: {page.name}")
+    
+    # 1. 获取 DOM
+    from app.routers.recording import _get_session
+    session = _get_session(project.id)
+    dom_data = session.discovered_pages.get(page.full_path, {}).get('dom')
+    
+    if not dom_data:
+        alt_p = page.full_path[:-1] if page.full_path.endswith('/') and len(page.full_path) > 1 else page.full_path + '/'
+        dom_data = session.discovered_pages.get(alt_p, {}).get('dom')
+
+    if not dom_data:
+        await send_log("warning", "⚠️ 未发现录制数据，尝试实时获取...")
+        mcp = PlaywrightMCPService(headless=True)
+        dom_data = await mcp.analyze_page(f"{project.base_url.rstrip('/')}/{page.full_path.lstrip('/')}", page.name)
+    
+    if dom_data: await send_log("success", "✅ 已锁定真实 DOM 数据")
+
+    # 2. 读取源码及组件
+    source_code = ""
+    component_codes = []
+    if project.repo_path:
+        current_file_path = page.file_path
+        if not current_file_path:
+            search_name = page.path.lower()
+            if search_name == '/': search_name = 'home'
+            for pattern in [f"**/{search_name}.vue", f"**/{search_name}View.vue", f"**/{search_name}Page.vue", "**/index.vue"]:
+                matches = list(Path(project.repo_path).glob(pattern))
+                if matches:
+                    current_file_path = str(matches[0].relative_to(project.repo_path)).replace('\\', '/')
+                    await send_log("success", f"🎯 自动匹配到源码: {current_file_path}")
+                    break
+        
+        if current_file_path:
+            full_p = os.path.join(project.repo_path, current_file_path)
+            if os.path.exists(full_p):
+                with open(full_p, 'r', encoding='utf-8') as f: source_code = f.read()
+        
+        from app.services.component_analyzer import analyze_components
+        comp_info = await analyze_components(project.repo_path)
+        comp_registry = {c['name']: c['file_path'] for c in comp_info.get('components', [])}
+        try:
+            used_names = json.loads(page.imported_components) if page.imported_components else []
+            for name in used_names:
+                if name in comp_registry:
+                    cp = os.path.join(project.repo_path, comp_registry[name])
+                    if os.path.exists(cp):
+                        with open(cp, 'r', encoding='utf-8') as f: 
+                            component_codes.append(f"### 组件: {name}\n{f.read()}")
+        except: pass
+    
+    # 3. 使用AST分析代码和DOM
+    await send_log("info", "🔬 正在分析页面结构...")
+    from app.agents.utils.code_analyzer import analyze_page_data, format_for_llm
+    
+    page_analysis = analyze_page_data(source_code, dom_data, current_file_path or '')
+    analysis_text = format_for_llm(page_analysis)
+    
+    await send_log("success", f"✅ 分析完成: 发现 {page_analysis['dom_structure'].get('interactive_count', 0)} 个交互元素")
+    await send_log("debug", f"发现 {page_analysis['dom_structure'].get('interactive_count', 0)} 个交互元素")
+    
+    # 检查是否有足够信息生成用例
+    if not page_analysis['code_structure'] and not page_analysis['dom_structure'].get('interactive_elements'):
+        await send_log("error", "❌ 页面信息不足，无法生成用例")
+        raise HTTPException(400, "页面信息不足，无法生成用例")
+    
+    # 4. 构建指令（使用分析后的精简信息）
+    system_content = (
+        "你是一个顶级的 Playwright Python 专家。\n"
+        "**只准返回 JSON，严禁文字说明！**\n"
+        "**JSON 必须包含 'test_cases' 字段，每个用例必须有 'script_content' 字段，其值为完整的 Python 代码字符串。**\n"
+        "代码要求：包含 import、包含 expect 断言、使用真实选择器。"
+    )
+    
+    user_content = f"""为页面生成测试用例。
+
+页面路径: {page.full_path}
+URL: {project.base_url.rstrip('/')}/{page.full_path.lstrip('/')}
+
+{analysis_text}
+
+请生成 2-3 个核心测试用例，覆盖最重要的交互场景。
+
+返回格式:
+{{
+  "test_cases": [
+    {{
+      "title": "用例标题",
+      "description": "测试目的描述",
+      "script_content": "import pytest\\nfrom playwright.sync_api import Page, expect\\ndef test_xxx(page: Page):\\n    ..."
+    }}
+  ]
+}}"""
+
+    # 4. 调用 LLM
+    await send_log("info", "🤖 正在调用专家级 LLM 生成完整代码...")
+    full_response = []
+    async def on_token(t: str):
+        full_response.append(t)
+        await ws_manager.broadcast({"type": "log", "level": "stream", "message": "".join(full_response)}, channel=f"mcp_{project.id}")
+
+    try:
+        raw = await llm_chat_stream([{"role": "system", "content": system_content}, {"role": "user", "content": user_content}], on_token=on_token)
+    except Exception as e:
+        await send_log("error", f"❌ LLM 故障: {str(e)}")
+        raise HTTPException(500, f"LLM 故障: {str(e)}")
+    
+    # 5. 超强力解析
+    await send_log("info", "📋 正在执行超强力解析...")
+    try:
+        content = raw.strip()
+            
+        # 调试：记录原始内容长度
+        await send_log("debug", f"原始响应长度: {len(content)} 字符")
+            
+        # 尝试提取 Markdown 代码块
+        code_block_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', content, re.DOTALL)
+        if code_block_match:
+            content = code_block_match.group(1).strip()
+            await send_log("debug", "从Markdown代码块提取内容")
+            
+        # 寻找 JSON 块（使用更健壮的方式）
+        json_str = None
+            
+        # 尝试找 test_cases 键
+        if '"test_cases"' in content or "'test_cases'" in content:
+            # 找最外层的大括号
+            start_idx = content.find('{')
+            end_idx = content.rfind('}')
+            if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                json_str = content[start_idx:end_idx+1]
+                await send_log("debug", f"提取JSON范围: {start_idx} 到 {end_idx}")
+            
+        # 如果没找到，尝试其他方式
+        if not json_str:
+            json_match = re.search(r'\{.*"test_cases".*\}', content, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            
+        if not json_str:
+            # 尝试寻找列表块并包装
+            list_match = re.search(r'\[.*\]', content, re.DOTALL)
+            if list_match:
+                json_str = f'{{"test_cases": {list_match.group(0)}}}'
+                await send_log("debug", "从列表包装为test_cases")
+            else:
+                raise ValueError(f"响应中未发现 test_cases。原始内容前500字符: {content[:500]}")
+            
+        # 清洗（保留代码中的换行）
+        json_str = json_str.replace('\r\n', '\n').replace('\r', '\n')
+                
+        # 修复非标准JSON：将单引号转为双引号，给无引号的属性名加引号
+        import re as regex
+        # 先处理字符串值中的单引号（简单替换，可能不完美）
+        # 将属性名的单引号替换为双引号: 'key': -> "key":
+        json_str = regex.sub(r"'([^']+)'\s*:", r'"\1":', json_str)
+        # 将字符串值的单引号替换为双引号: 'value' -> "value"
+        # 注意：这可能会破坏包含单引号的文本内容，但作为fallback尝试
+                
+        # 尝试解析
+        try:
+            result = json.loads(json_str)
+        except json.JSONDecodeError as je:
+            await send_log("warning", f"标准JSON解析失败，尝试容错解析: {je}")
+            # 尝试使用更宽松的解析（如yaml）或手动修复
+            try:
+                # 尝试用ast.literal_eval解析Python字典格式
+                import ast
+                result = ast.literal_eval(json_str)
+                await send_log("debug", "使用ast.literal_eval解析成功")
+            except Exception as e2:
+                await send_log("error", f"JSON解析失败: {je}")
+                await send_log("debug", f"问题JSON前300字符: {json_str[:300]}")
+                raise
+            
+        # 兼容性处理
+        if isinstance(result, list):
+            cases_data = result
+            await send_log("debug", f"结果直接是列表，共 {len(cases_data)} 条")
+        else:
+            cases_data = result.get("test_cases", [])
+            await send_log("debug", f"从test_cases提取，共 {len(cases_data)} 条")
+            
+        if not cases_data:
+            await send_log("warning", "test_cases 为空列表")
+            return {"status": "success", "count": 0}
+            
+        created_count = 0
+        for i, cd in enumerate(cases_data):
+            # 关键：确保 script_content 存在
+            script = cd.get("script_content") or cd.get("script")
+            if not script and cd.get("steps"):
+                script = f"# 步骤化用例：\n# " + str(cd.get("steps"))
+                
+            title = cd.get("title") or cd.get("name", f"用例_{i+1}")
+                
+            tc = TestCase(
+                project_id=project.id, 
+                page_id=page.id, 
+                title=title, 
+                description=cd.get("description", ""), 
+                script_content=script or "# 无代码内容", 
+                group_name=page.full_path
+            )
+            db.add(tc)
+            created_count += 1
+                
+        await db.commit()
+        await send_log("success", f"✅ 专家级用例已入库 ({created_count} 条)")
+        return {"status": "success", "count": created_count}
+    except Exception as e:
+        await send_log("error", f"❌ 解析/保存失败: {str(e)}")
+        print(f"[解析异常] 原始内容前1000字符: {raw[:1000]}", flush=True)
+        raise HTTPException(500, f"处理失败: {str(e)}")
+
+
+@router.get("/{page_id}/cases")
+async def get_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
+    page = await db.get(TestPage, page_id)
+    if not page: return []
+    
+    async def get_child_ids(pid):
+        r = await db.execute(select(TestPage.id).where(TestPage.parent_id == pid))
+        ids = [row[0] for row in r.all()]
+        for cid in list(ids): ids.extend(await get_child_ids(cid))
+        return ids
+
+    pids = [page_id] + await get_child_ids(page_id)
+    res = await db.execute(select(TestCase).where(TestCase.page_id.in_(pids)).order_by(TestCase.created_at.desc()))
+    return res.scalars().all()
+
+
+# ========== 智能体生成用例（LangGraph） ==========
+
+@router.post("/{page_id}/generate-agent")
+async def generate_cases_with_agent(
+    page_id: str, 
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    使用LangGraph智能体生成测试用例
+    
+    流程：
+    1. 获取页面源码和DOM数据
+    2. 调用智能体分析（代码分析 → DOM分析 → 策略分析 → 生成用例）
+    3. 保存生成的用例到数据库
+    4. 返回完整结果（包含分析过程和用例）
+    """
+    from app.agents import TestCaseAgent, AgentConfig, TestCaseInput
+    from app.services.llm_service import llm_chat_json
+    from app.core.config import settings
+    from app.core.websocket import ws_manager
+    from datetime import datetime
+    
+    # 获取页面信息
     page = await db.get(TestPage, page_id)
     if not page:
         raise HTTPException(404, "页面不存在")
-    
-    if not page.is_leaf:
-        raise HTTPException(400, "只能为叶子节点（页面）生成用例")
     
     project = await db.get(Project, page.project_id)
     if not project:
         raise HTTPException(404, "项目不存在")
     
-    # WebSocket日志推送函数
-    async def send_log(level: str, message: str):
-        """发送WebSocket日志"""
-        log_entry = {
-            "type": "log",
-            "level": level,
-            "message": message,
-            "timestamp": __import__('datetime').datetime.now().isoformat()
-        }
-        await ws_manager.broadcast(log_entry, channel=f"mcp_{project.id}")
-        mcp_log_service.log(project.id, level, message)
-    
-    await send_log("info", f"🔍 开始为页面生成用例: {page.name}")
-    await send_log("info", f"📄 页面路径: {page.full_path}")
-    
-    # 第一步：获取真实DOM数据 (优先从录制会话获取)
-    from app.routers.recording import _get_session
-    session = _get_session(project.id)
-    
-    dom_data = None
-    # 尝试多种匹配方式，确保能找到录制数据
-    search_paths = [page.full_path]
-    if page.full_path.endswith('/') and len(page.full_path) > 1:
-        search_paths.append(page.full_path[:-1])
-    elif not page.full_path.endswith('/'):
-        search_paths.append(page.full_path + '/')
-        
-    for p in search_paths:
-        recorded_page = session.discovered_pages.get(p)
-        if recorded_page and recorded_page.get('dom'):
-            await send_log("success", f"✅ 发现已录制的页面数据 (匹配路径: {p})")
-            dom_data = recorded_page['dom']
-            break
-    
-    if not dom_data:
-        # 兜底：如果还是没找到，尝试模糊匹配（忽略大小写和末尾斜杠）
-        normalized_path = page.full_path.lower().rstrip('/')
-        for route, data in session.discovered_pages.items():
-            if route.lower().rstrip('/') == normalized_path and data.get('dom'):
-                await send_log("success", f"✅ 模糊匹配成功: {route}")
-                dom_data = data['dom']
-                break
-    
-    if not dom_data:
-        await send_log("info", "🌐 录制会话中未找到该页面数据，尝试使用Playwright实时访问...")
-        # ... 后面保持不变 ...
-        mcp = PlaywrightMCPService(headless=True)
-        try:
-            # 构建页面URL
-            page_url = f"{project.base_url}{page.full_path}"
-            if not page_url.startswith(('http://', 'https://')):
-                page_url = f"http://{page_url}"
-                
-            await send_log("info", f"🔗 访问页面: {page_url}")
-            
-            # 分析页面
-            dom_data = await mcp.analyze_page(
-                url=page_url,
-                page_name=page.name,
-                timeout=15000
-            )
-            
-            if dom_data:
-                await send_log("success", f"✅ 实时获取DOM数据成功")
-        except Exception as e:
-            await send_log("error", f"❌ 实时获取DOM数据失败: {str(e)}")
-            
-    if not dom_data:
-        await send_log("error", "❌ 无法获取DOM数据，终止生成")
-        await send_log("info", "💡 请先通过'探索录制'访问该页面，或确保本地服务已启动")
-        return {"error": "DOM数据获取失败", "page_id": page_id}
-    
-    # 第二步：读取页面对应的Vue源代码及关联组件源码
-    await send_log("info", "📂 正在读取页面及关联组件源代码...")
-    
+    # 获取源码
     source_code = ""
-    component_codes = []
-    
-    if project.repo_path:
-        # 1. 尝试获取主页面源码
-        current_file_path = page.file_path
-        
-        # 【增强】如果数据库里没有 file_path，尝试根据路径名动态搜索匹配的 Vue 文件
-        if not current_file_path:
-            await send_log("info", f"🔍 尝试自动搜索匹配的源码文件...")
-            from pathlib import Path
-            search_name = page.path.lower()
-            if search_name == '/': search_name = 'home' # 根路径特殊处理
-            
-            # 常见的 Vue 页面文件命名规范
-            patterns = [
-                f"**/{search_name}.vue",
-                f"**/{search_name}View.vue",
-                f"**/{search_name}Page.vue",
-                f"**/index.vue" # 如果是文件夹结构
-            ]
-            
-            repo_root = Path(project.repo_path)
-            matched_file = None
-            for pattern in patterns:
-                matches = list(repo_root.glob(pattern))
-                if matches:
-                    # 优先选择 views 或 pages 目录下的
-                    views_matches = [m for m in matches if 'views' in str(m) or 'pages' in str(m)]
-                    matched_file = views_matches[0] if views_matches else matches[0]
-                    break
-            
-            if matched_file:
-                current_file_path = str(matched_file.relative_to(repo_root)).replace('\\', '/')
-                await send_log("success", f"🎯 自动匹配到源码文件: {current_file_path}")
-        
-        if current_file_path:
-            source_file_path = os.path.join(project.repo_path, current_file_path)
-            if os.path.exists(source_file_path):
-                try:
-                    with open(source_file_path, 'r', encoding='utf-8') as f:
-                        source_code = f.read()
-                    await send_log("success", f"✅ 页面源代码读取成功: {len(source_code)} 字")
-                except Exception as e:
-                    await send_log("warning", f"⚠️ 页面源代码读取失败: {str(e)}")
-            else:
-                await send_log("warning", f"⚠️ 页面源代码文件不存在: {source_file_path}")
-        
-        # 2. 读取关联组件源码
-        from app.services.component_analyzer import analyze_components
-        all_components_info = await analyze_components(project.repo_path)
-        comp_registry = {c['name']: c['file_path'] for c in all_components_info.get('components', [])}
-        
-        # 获取该页面使用的组件名
-        used_component_names = []
-        # 从静态分析获取
-        if page.imported_components:
-            try:
-                imported = json.loads(page.imported_components)
-                if isinstance(imported, list):
-                    used_component_names.extend(imported)
-            except:
-                pass
-        
-        # 从DOM中进一步尝试提取组件名（简单的启发式：非标准HTML标签）
-        standard_tags = {'div', 'span', 'a', 'p', 'button', 'input', 'ul', 'li', 'h1', 'h2', 'h3', 'header', 'footer', 'main', 'section', 'form', 'label', 'img', 'svg', 'canvas'}
-        if dom_data and 'interactive_elements' in dom_data:
-            for el in dom_data['interactive_elements']:
-                tag = el.get('tag', '').lower()
-                if tag and tag not in standard_tags and '-' in tag: # 类似于 a-button, my-component
-                    # 尝试转换 a-button -> Button 这种匹配（简单处理）
-                    pass
-        
-        # 去重
-        used_component_names = list(set(used_component_names))
-        
-        if used_component_names:
-            await send_log("info", f"🧩 发现 {len(used_component_names)} 个关联组件，正在抓取源码...")
-            for comp_name in used_component_names:
-                if comp_name in comp_registry:
-                    comp_path = os.path.join(project.repo_path, comp_registry[comp_name])
-                    if os.path.exists(comp_path):
-                        try:
-                            with open(comp_path, 'r', encoding='utf-8') as f:
-                                comp_src = f.read()
-                            component_codes.append(f"### 组件: {comp_name} ({comp_registry[comp_name]})\n\n{comp_src}")
-                        except:
-                            pass
-            
-            if component_codes:
-                await send_log("success", f"✅ 已合并 {len(component_codes)} 个组件的源代码")
-    else:
-        await send_log("warning", "⚠️ 项目代码路径未配置，无法读取源码")
-    
-    # 第三步：构建Prompt
-    await send_log("info", "📝 正在构建Prompt...")
-    
-    # 构建组件代码上下文
-    component_context = ""
-    if component_codes:
-        component_context = "\n## 相关组件源代码\n\n" + "\n\n---\n\n".join(component_codes)
-    
-    # 构建DOM数据描述
-    
-    # 获取组件列表
-    components = []
-    if page.component_name:
+    if page.file_path and os.path.exists(page.file_path):
         try:
-            components = json.loads(page.component_name)
-            if not isinstance(components, list):
-                components = []
-        except:
-            components = []
+            with open(page.file_path, 'r', encoding='utf-8') as f:
+                source_code = f.read()
+        except Exception as e:
+            print(f"[智能体生成] 读取源码失败: {e}")
     
-    # 构建DOM数据描述
-    dom_description = ""
-    if dom_data:
-        dom_description = f"""
-## 真实DOM数据（通过Playwright获取）
-
-页面标题: {dom_data.get('title', '')}
-
-### 交互元素
-```json
-{json.dumps(dom_data.get('interactive_elements', [])[:20], ensure_ascii=False, indent=2)}
-```
-
-### CSS选择器（部分）
-```json
-{json.dumps(dom_data.get('all_selectors', [])[:30], ensure_ascii=False, indent=2)}
-```
-"""
-    
-    # 构建Prompt
-    system_content = (
-        "你是一个资深QA工程师和Playwright Python测试专家。\n\n"
-        "**极其重要的要求：**\n"
-        "1. **直接返回JSON，不要任何思考过程、分析、解释、说明**\n"
-        "2. **不要使用markdown代码块**\n"
-        "3. **第一个字符必须是{，最后一个字符必须是}**\n"
-        "4. 基于源代码理解业务逻辑和预期行为\n"
-        "5. 基于DOM数据使用真实的选择器\n"
-        "6. 每个用例必须包含断言\n"
-        "7. 使用pytest格式\n"
-        "8. 代码要完整可执行\n\n"
-        "**如果你返回任何非JSON内容，系统将无法解析，任务会失败！**"
-    )
-    
-    user_content = f"""请为Playbot的页面生成全面的端到端测试用例。
-
-## 页面信息
-- 页面名称: {page.name}
-- 页面路径: {page.full_path}
-- 页面URL: {project.base_url}{page.full_path}
-
-## 源代码
-
-{source_code if source_code else '（源代码未提供）'}
-
-{component_context if component_context else ''}
-
-{dom_description if dom_description else '（DOM数据未提供）'}
-
-## 生成要求
-
-基于源代码和DOM数据，生成覆盖以下场景的测试用例：
-1. 页面加载测试（验证页面结构、关键元素）
-2. 主要功能测试（基于源代码的业务逻辑）
-3. 表单交互测试（如果有表单）
-4. 边界情况和错误处理
-
-## 输出格式
-
-**再次强调：直接返回JSON，不要任何其他内容！**
-
-返回格式：
-{{
-  "test_cases": [
-    {{
-      "title": "测试用例标题",
-      "description": "测试用例描述",
-      "script_content": "完整的pytest测试代码"
-    }}
-  ]
-}}
-
-**重要：script_content中的代码必须使用真实的选择器（从DOM数据中获取），不要硬编码或猜测选择器！**
-**重要：不要返回任何分析过程，直接返回JSON！**
-"""
-    
-    messages = [
-        {"role": "system", "content": system_content},
-        {"role": "user", "content": user_content},
-    ]
-    
-    # 显示发送给LLM的完整Prompt
-    await send_log("info", f"📤 发送给LLM的Prompt:\n\n【System】\n{system_content}\n\n【User】\n{user_content}")
-    
-    await send_log("info", "🤖 正在调用LLM生成测试用例...")
-    
-    # 使用流式输出，每100字推送一次累积内容
-    token_buffer = []
-    last_push_length = 0
-    
-    async def on_token(token: str):
-        """每收到一个token的回调"""
-        nonlocal last_push_length
-        token_buffer.append(token)
-        
-        # 每累积100字推送一次
-        current_content = "".join(token_buffer)
-        if len(current_content) - last_push_length >= 100:
-            last_push_length = len(current_content)
-            # 使用特殊level标记这是流式内容，前端不显示时间戳
-            await send_log("stream", current_content)
-    
+    # 获取DOM数据（从录制会话中获取）
+    dom_data = {}
     try:
-        raw = await llm_chat_stream(
-            messages, 
-            temperature=0.3, 
-            max_tokens=8192,
-            on_token=on_token
-        )
+        from app.routers.recording import _get_session
+        session = _get_session(project.id)
         
-        if not raw or len(raw) == 0:
-            await send_log("error", "❌ LLM返回内容为空，请检查后端日志")
-            raise HTTPException(500, "LLM返回内容为空")
-        
-        # 推送剩余内容
-        remaining = "".join(token_buffer)
-        if len(remaining) > last_push_length:
-            await send_log("stream", remaining)
-        
-        await send_log("success", f"\n✅ LLM生成完成，共 {len(raw)} 字")
-    except Exception as e:
-        await send_log("error", f"❌ LLM调用失败: {str(e)}")
-        print(f"[生成用例] LLM调用失败: {e}", flush=True)
-        print(traceback.format_exc(), flush=True)
-        raise HTTPException(500, f"LLM调用失败: {str(e)}")
-    
-    # 解析 LLM 响应
-    await send_log("info", "📋 正在解析LLM返回的测试用例...")
-    try:
-        content = raw.strip()
-        
-        # 第一步：尝试提取JSON代码块
-        # 匹配 ```json ... ``` 或 ``` ... ```
-        import re
-        # 使用贪婪匹配，匹配到最后一个}```
-        json_block_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', content, re.DOTALL)
-        
-        if json_block_match:
-            # 从代码块中提取JSON
-            content = json_block_match.group(1)
-            await send_log("info", f"✅ 从代码块中提取JSON: {len(content)} 字")
+        # 尝试匹配页面路径
+        if page.full_path in session.discovered_pages:
+            dom_data = session.discovered_pages[page.full_path].get('dom', {})
         else:
-            # 第二步：智能提取JSON - 跳过LLM的分析过程，直接找到JSON部分
-            # 从后往前找，因为JSON通常在最后
-            last_brace = content.rfind("}")
-            if last_brace == -1:
-                raise ValueError("未找到JSON结束标记 }")
-            
-            # 找test_cases字段
-            test_cases_idx = content.rfind('"test_cases"')
-            if test_cases_idx == -1:
-                raise ValueError("未找到test_cases字段")
-            
-            # 从test_cases往前找{
-            start_idx = content.rfind("{", 0, test_cases_idx)
-            if start_idx == -1:
-                raise ValueError("未找到JSON开始标记 {")
-            
-            content = content[start_idx:last_brace+1]
-            await send_log("info", f"✅ 提取JSON成功: {len(content)} 字")
+            # 尝试其他匹配方式（带/不带末尾斜杠）
+            alt_path = page.full_path.rstrip('/') if page.full_path.endswith('/') else page.full_path + '/'
+            if alt_path in session.discovered_pages:
+                dom_data = session.discovered_pages[alt_path].get('dom', {})
         
-        print(f"[生成用例] 解析内容长度: {len(content)}, 前100字: {content[:100]}", flush=True)
-        
-        result = json.loads(content)
-        cases_data = result.get("test_cases", [])
-        await send_log("success", f"✅ 成功解析到 {len(cases_data)} 条测试用例")
-    except (json.JSONDecodeError, KeyError, ValueError) as e:
-        await send_log("error", f"❌ 解析失败: {str(e)}")
-        await send_log("error", f"原始内容前200字: {raw[:200]}")
-        print(f"[生成用例] 解析失败: {e}", flush=True)
-        print(f"[生成用例] 原始内容前500字: {raw[:500]}", flush=True)
-        raise HTTPException(500, f"LLM 返回格式错误: {str(e)}")
+        if dom_data:
+            print(f"[智能体生成] 从录制会话获取DOM数据: {page.full_path}", flush=True)
+    except Exception as e:
+        print(f"[智能体生成] 获取DOM数据失败: {e}", flush=True)
     
-    # 保存用例
-    await send_log("info", f"💾 正在保存 {len(cases_data)} 条测试用例到数据库...")
-    created_cases = []
-    for idx, case_data in enumerate(cases_data):
-        tc = TestCase(
-            project_id=project.id,
-            page_id=page.id,
-            title=case_data.get("title", f"测试用例 {idx + 1}"),
-            description=case_data.get("description", ""),
-            script_content=case_data.get("script_content", ""),
-            group_name=page.full_path,  # 使用页面路径作为分组
+    # 日志回调函数
+    logs = []
+    async def log_callback(level: str, message: str):
+        logs.append({"level": level, "message": message, "time": datetime.now().isoformat()})
+        # 同时发送到WebSocket (复用MCP日志面板订阅的频道)
+        await ws_manager.broadcast({
+            "type": "agent_log",
+            "page_id": page_id,
+            "level": level,
+            "message": message
+        }, channel=f"mcp_{project.id}")
+        
+        # 不要把累加形的流式输出打印到标准控制台，只打印离散节点的心跳日志
+        if level != "stream":
+            print(f"[智能体-{level}] {message}")
+    
+    try:
+        from app.services.llm_service import llm_chat_stream
+        
+        async def streaming_llm_caller(messages):
+            # 获取全内容的累加 buffer 向前台冲刷
+            buffer = []
+            async def on_token_callback(token_text: str):
+                buffer.append(token_text)
+                await log_callback("stream", "".join(buffer))
+            # 在外层包装一次，拦截调用直接抛到 websocket 里
+            return await llm_chat_stream(messages, on_token=on_token_callback)
+
+        config = AgentConfig(
+            llm_caller=streaming_llm_caller,
+            langfuse_public_key=settings.langfuse_public_key,
+            langfuse_secret_key=settings.langfuse_secret_key,
+            langfuse_host=settings.langfuse_host
         )
-        db.add(tc)
-        created_cases.append(tc)
-    
-    await db.commit()
-    for tc in created_cases:
-        await db.refresh(tc)
-    
-    await send_log("success", f"✅ 成功生成并保存 {len(created_cases)} 条测试用例")
-    return created_cases
-
-
-@router.get("/{page_id}/cases")
-async def get_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
-    """获取页面下的所有用例（包括子页面）"""
-    page = await db.get(TestPage, page_id)
-    if not page:
-        # 如果页面不存在，返回空列表而不是抛出404，防止前端崩溃
-        return []
-    
-    # 获取该页面及所有子页面的 ID
-    async def get_all_child_page_ids(parent_id: str) -> list[str]:
-        result = await db.execute(
-            select(TestPage.id).where(TestPage.parent_id == parent_id)
+        # 创建智能体并生成
+        agent = TestCaseAgent(config=config, log_callback=log_callback)
+        
+        await log_callback("info", f"🚀 开始为页面 [{page.full_path}] 生成测试用例")
+        await log_callback("info", f"📄 源码长度: {len(source_code)} 字符")
+        await log_callback("info", f"🌐 页面URL: {project.base_url}{page.path}")
+        await log_callback("info", f"📊 DOM数据: {'已获取' if dom_data else '未获取'} ({len(str(dom_data)) if dom_data else 0} 字符)")
+        
+        input_data = TestCaseInput(
+            page_url=f"{project.base_url}{page.path}",
+            file_path=page.file_path or "", 
+            source_code=source_code,
+            dom_data=dom_data
         )
-        child_ids = [row[0] for row in result.all()]
+        result = await agent.generate(input_data)
         
-        all_ids = list(child_ids)
-        for child_id in child_ids:
-            all_ids.extend(await get_all_child_page_ids(child_id))
+        # 保存用例到数据库
+        test_cases = result.get("test_cases", [])
+        created_cases = []
         
-        return all_ids
-    
-    page_ids = [page_id] + await get_all_child_page_ids(page_id)
-    
-    # 查询这些页面的所有用例
-    result = await db.execute(
-        select(TestCase)
-        .where(TestCase.page_id.in_(page_ids))
-        .order_by(TestCase.created_at.desc())
-    )
-    cases = result.scalars().all()
-    
-    return cases
+        for case_data in test_cases:
+            tc = TestCase(
+                project_id=page.project_id,
+                page_id=page_id,
+                title=case_data.get("title", "未命名用例"),
+                description=case_data.get("description", ""),
+                script_content=case_data.get("script_content", ""),
+                group_name=page.full_path,
+                enabled=True
+            )
+            db.add(tc)
+            created_cases.append(tc)
+        
+        await db.commit()
+        
+        # 刷新获取ID
+        for tc in created_cases:
+            await db.refresh(tc)
+        
+        if result.get("error"):
+            await log_callback("error", f"❌ 任务生成因异常被迫终止: {result.get('error')}")
+        else:
+            await log_callback("success", f"✅ 成功生成并保存 {len(created_cases)} 个用例")
+        
+        return {
+            "status": "success",
+            "page_id": page_id,
+            "page_path": page.full_path,
+            "generated_count": len(created_cases),
+            "test_cases": [
+                {
+                    "id": tc.id,
+                    "title": tc.title,
+                    "description": tc.description,
+                    "script_content": tc.script_content
+                }
+                for tc in created_cases
+            ],
+            "analysis": result.get("analysis", {}),
+            "logs": logs
+        }
+        
+    except Exception as e:
+        error_msg = str(e)
+        await log_callback("error", f"❌ 生成失败: {error_msg}")
+        raise HTTPException(500, f"智能体生成失败: {error_msg}")
 
 
-# 需要导入 update
-from sqlalchemy import update
+@router.get("/debug/langfuse-status")
+async def get_langfuse_status():
+    """
+    获取 Langfuse 追踪状态
+    
+    用于调试和确认 Langfuse 是否正确配置
+    """
+    from app.core.config import settings
+    
+    enabled = bool(settings.langfuse_enabled and settings.langfuse_public_key and settings.langfuse_secret_key)
+    base_url = settings.langfuse_host.rstrip('/')
+    
+    return {
+        "enabled": enabled,
+        "config": {
+            "enabled": enabled,
+            "host": settings.langfuse_host,
+            "public_key_configured": bool(settings.langfuse_public_key),
+            "secret_key_configured": bool(settings.langfuse_secret_key),
+        },
+        "trace_url": f"{base_url}/traces",
+        "setup_guide": "访问 https://cloud.langfuse.com 获取 API Keys 或本地部署 Langfuse"
+    }
