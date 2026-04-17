@@ -11,6 +11,41 @@ from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page
 logger = logging.getLogger(__name__)
 
 
+# 全局注入的高级 DOM 结构化提取器（完全兼容后端的智能模型节点）
+EXTRACT_DOM_JS = """
+() => {
+    const elements = [];
+    const selectors = [
+        'button', 'input', 'select', 'textarea', 
+        'a[href]', '[role="button"]', '[role="tab"]', 
+        '[role="checkbox"]', '[role="radio"]', 
+        '[onclick]', '[tabindex="0"]'
+    ];
+    selectors.forEach(selector => {
+        document.querySelectorAll(selector).forEach(el => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0 && rect.height > 0) {
+                elements.push({
+                    tag: el.tagName.toLowerCase(),
+                    type: el.type || el.getAttribute('role') || '',
+                    id: el.id || '',
+                    class: typeof el.className === 'string' ? el.className : '',
+                    text: (el.innerText || '').substring(0, 100),
+                    placeholder: el.placeholder || '',
+                    value: el.value || '',
+                    selector: `${el.tagName.toLowerCase()}${el.id ? '#'+el.id : ''}${typeof el.className === 'string' && el.className ? '.'+el.className.trim().replace(/\s+/g, '.') : ''}`
+                });
+            }
+        });
+    });
+    
+    return {
+        html: document.documentElement.outerHTML,
+        interactive_elements: elements
+    };
+}
+"""
+
 class RecordingSession:
     """录制会话状态管理"""
     
@@ -182,9 +217,13 @@ class RecordingSession:
                 import time
                 time.sleep(0.5)
                 
-                dom = self.page.evaluate('() => document.documentElement.outerHTML')
-                if dom and len(dom) > 100:
-                    self.add_page(url, {'html': dom, 'url': url})
+                page_data = self.page.evaluate(EXTRACT_DOM_JS)
+                if page_data and page_data.get('html') and len(page_data['html']) > 100:
+                    self.add_page(url, {
+                        'html': page_data['html'],
+                        'interactive_elements': page_data.get('interactive_elements', []),
+                        'url': url
+                    })
                     print(f"[录制会话] 🤖 自动捕获成功: {route_pattern}", flush=True)
             except:
                 pass
@@ -214,12 +253,16 @@ class RecordingSession:
             import time
             time.sleep(0.3)
             
-            # 获取DOM
-            dom = self.page.evaluate('() => document.documentElement.outerHTML')
+            # 获取结构化DOM数据
+            page_data = self.page.evaluate(EXTRACT_DOM_JS)
             
-            if dom and len(dom) > 100:  # 确保DOM不为空
-                self.add_page(url, {'html': dom, 'url': url})
-                logger.info(f"[录制会话] ✅ DOM捕获成功: {len(dom)} 字符, URL: {url}")
+            if page_data and page_data.get('html') and len(page_data['html']) > 100:
+                self.add_page(url, {
+                    'html': page_data['html'],
+                    'interactive_elements': page_data.get('interactive_elements', []),
+                    'url': url
+                })
+                logger.info(f"[录制会话] ✅ DOM捕获成功: {len(page_data['html'])} 字符, URL: {url}")
             else:
                 logger.warning(f"[录制会话] ⚠️ DOM为空或太短: {url}")
         except Exception as e:
@@ -239,15 +282,19 @@ class RecordingSession:
             
             logger.info(f"[录制会话] 📄 页面加载: {url}")
             
-            # 等待并捕获DOM
+            # 等待并捕获结构化DOM
             import time
             time.sleep(0.5)
             
-            dom = self.page.evaluate('() => document.documentElement.outerHTML')
+            page_data = self.page.evaluate(EXTRACT_DOM_JS)
             
-            if dom and len(dom) > 100:
-                self.add_page(url, {'html': dom, 'url': url})
-                logger.info(f"[录制会话] ✅ DOM捕获成功: {len(dom)} 字符, URL: {url}")
+            if page_data and page_data.get('html') and len(page_data['html']) > 100:
+                self.add_page(url, {
+                    'html': page_data['html'],
+                    'interactive_elements': page_data.get('interactive_elements', []),
+                    'url': url
+                })
+                logger.info(f"[录制会话] ✅ DOM捕获成功: {len(page_data['html'])} 字符, URL: {url}")
         except Exception as e:
             logger.error(f"[录制会话] ❌ 页面加载捕获失败: {e}")
     

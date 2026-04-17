@@ -429,14 +429,37 @@ async def generate_cases_with_agent(
     if not project:
         raise HTTPException(404, "项目不存在")
     
-    # 获取源码
+    # 尝试多种源码挂载策略（如果缺失 file_path，通过路径进行模糊匹配抓取源码）
     source_code = ""
-    if page.file_path and os.path.exists(page.file_path):
-        try:
-            with open(page.file_path, 'r', encoding='utf-8') as f:
-                source_code = f.read()
-        except Exception as e:
-            print(f"[智能体生成] 读取源码失败: {e}")
+    target_file_path = page.file_path
+    from pathlib import Path
+    
+    if not target_file_path and project.repo_path:
+        search_name = page.path.lower().strip('/')
+        if not search_name or search_name == '':
+            search_name = 'home'
+        for pattern in [f"**/{search_name}.vue", f"**/{search_name}View.vue", f"**/{search_name}Page.vue"]:
+            matches = list(Path(project.repo_path).glob(pattern))
+            if matches:
+                # 转为统一的 unix 风格前缀
+                target_file_path = str(matches[0].relative_to(project.repo_path)).replace('\\', '/')
+                print(f"[源码模糊匹配] 命中前端项目组件: {target_file_path}", flush=True)
+                break
+
+    if target_file_path:
+        search_paths = [
+            target_file_path,
+            os.path.join(project.repo_path, target_file_path) if project.repo_path else "",
+        ]
+        for target_path in search_paths:
+            if target_path and os.path.exists(target_path) and os.path.isfile(target_path):
+                try:
+                    with open(target_path, 'r', encoding='utf-8') as f:
+                        source_code = f.read()
+                    print(f"[源码加载] 成功命中并读取文件: {target_path}", flush=True)
+                    break
+                except Exception as e:
+                    print(f"[源码加载] 读取异常: {e}", flush=True)
     
     # 获取DOM数据（从录制会话中获取）
     dom_data = {}
@@ -486,8 +509,17 @@ async def generate_cases_with_agent(
             # 在外层包装一次，拦截调用直接抛到 websocket 里
             return await llm_chat_stream(messages, on_token=on_token_callback)
 
+        from app.services.llm_service import get_langchain_chat_model
+        async def structured_wrapper(messages, target_schema):
+            llm = await get_langchain_chat_model()
+            structured_llm = llm.with_structured_output(target_schema)
+            # 给前台微反馈，不至于看着卡了
+            await log_callback("stream", "正在通过 Schema 进行任务规划编排...\n")
+            return await structured_llm.ainvoke(messages)
+
         config = AgentConfig(
             llm_caller=streaming_llm_caller,
+            structured_llm_caller=structured_wrapper,
             langfuse_public_key=settings.langfuse_public_key,
             langfuse_secret_key=settings.langfuse_secret_key,
             langfuse_host=settings.langfuse_host

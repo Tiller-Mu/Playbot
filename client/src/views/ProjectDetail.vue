@@ -16,6 +16,10 @@ import type { Project, TestPage } from '../types'
 import { projectApi, pageApi, generateApi } from '../services/api'
 import RecorderModal from '../components/RecorderModal.vue'
 
+// Markdown 日志高亮控件
+import { MdPreview } from 'md-editor-v3'
+import 'md-editor-v3/lib/preview.css'
+
 const route = useRoute()
 const router = useRouter()
 const projectId = computed(() => route.params.id as string)
@@ -153,6 +157,11 @@ async function loadComponents() {
 
 // 录制完成回调
 async function handleRecordingComplete(report: any) {
+  if (!report || typeof report.coverage_rate === 'undefined') {
+    await loadPageTree()
+    return
+  }
+
   coverageReport.value = report
   showCoverageReport.value = true
   
@@ -946,9 +955,14 @@ onUnmounted(() => {
             </div>
           </template>
           
-          <!-- 流式内容：直接显示，无时间戳 -->
-          <div v-else class="log-body log-stream">
-            {{ log.message }}
+          <!-- 流式内容：基于成型的 Markdown 渲染控件呈现 -->
+          <div v-else class="log-body log-stream mcp-md-overrides">
+            <MdPreview 
+              :modelValue="log.message" 
+              theme="dark" 
+              previewTheme="github"
+              codeTheme="github"
+            />
           </div>
           
           <!-- 附加数据 -->
@@ -1100,5 +1114,24 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
   line-height: 1.4;
+}
+
+/* 覆盖底层控件防止出现黑底白边，融入黑金背板 */
+:deep(.mcp-md-overrides .md-editor-previewOnly) {
+  background-color: transparent !important;
+}
+:deep(.mcp-md-overrides .md-editor-preview-wrapper) {
+  padding: 0 !important;
+}
+:deep(.mcp-md-overrides .default-theme p) {
+  color: #d4d4d4 !important;
+  margin-bottom: 8px;
+}
+
+/* 强化代码注释，方便非开发者快速阅读意图 */
+:deep(.mcp-md-overrides .hljs-comment) {
+  color: #10b981 !important;
+  font-style: normal !important;
+  font-weight: 500 !important;
 }
 </style>

@@ -6,6 +6,9 @@ class AgentConfig(BaseModel):
     # 【核心解耦】调用LLM的具体执行函数，签名要求: async def(messages: list) -> str
     llm_caller: Callable = Field(description="负责处理大模型交互的异步闭包或函数。要求接收 messages 列表，返回响应文本（建议强制JSON模式）")
     
+    # 【结构化输出】针对强约束场景，返回Pydantic结构体。签名要求: async def(messages: list, schema: type[BaseModel]) -> BaseModel
+    structured_llm_caller: Optional[Callable] = Field(None, description="用于结构化输出的异步闭包（建议借助LangChain的with_structured_output）")
+    
     # Langfuse相关的非必填观测性参数
     langfuse_public_key: Optional[str] = Field(None, description="Langfuse公钥，指定了则开启云端图流观测")
     langfuse_secret_key: Optional[str] = Field(None, description="Langfuse密钥")

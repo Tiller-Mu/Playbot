@@ -16,6 +16,16 @@ from .tools import CodeAnalyzerTool, DOMExtractorTool, TestStrategyTool
 from .langfuse_utils import get_langfuse_callback_handler
 from .schemas import AgentConfig, TestCaseInput
 from .utils.python_validator import validate_python_code
+from pydantic import BaseModel, Field
+
+
+class SingleCasePlan(BaseModel):
+    title: str = Field(description="测试用例标题，注意要用人类可读的短语，严禁使用...占位符。")
+    description: str = Field(description="该用例执行的具体测试意图、断点和操作流程描述。")
+
+class PlannedCasesOutput(BaseModel):
+    thought: str = Field(description="分析该页面特征与策略，输出为什么这么设计用例的思考与依据")
+    cases: list[SingleCasePlan] = Field(description="规划出的独立测试用例列表。请根据页面特征产出最合理数量的测试用例，自然拆分相关意图，无需刻意增减数量。")
 
 
 class AgentState(TypedDict, total=False):
@@ -113,11 +123,19 @@ class TestCaseAgent:
             logs_delta = [await self._log("info", "📝 正在制定测试用例大纲计划...")]
             system_prompt = """你是一个专业的Playwright测试架构师。
 基于提供的策略分析和页面全量信息，分解出你需要编写的各个单一测试用例计划。
-要求：产出3-5个高优先级的、能够独立运行的测试大纲，包含该测试的标题和具体的意图说明。
-直接返回纯JSON数组字符串，不要附带任何解释。格式如下：
-[
-  {"title": "登录成功", "description": "输入正确账号密码点击登录按钮"}
-]"""
+要求：基于页面的模块逻辑，产出最合理数量的、能够独立运行的测试大纲（只需覆盖真实的核心正反向场景，不过度拆分，也不盲目合并），包含该测试的标题和具体的意图说明。
+严禁使用 "..." 等省略号，每个用例都必须具备完整的意图！
+
+【强制响应格式要求】
+你必须且仅能返回一个包含双通道数据的纯净 JSON 对象！绝不允许使用 ```json 等 Markdown 标记块结构来包裹数据！！
+首先在 `thought` 字段中写下你的深度推理和决策，最后在 `cases` 字段中输出最终用例！
+示例：
+{
+  "thought": "页面拥有完整的登录树和设置选项卡，应该分别测试...",
+  "cases": [
+    {"title": "测试保存设置", "description": "测试正常的保存流验证"}
+  ]
+}"""
             user_prompt = f"""【测试策略总旨】
 {state.get('test_strategy', '')}
 
@@ -127,25 +145,46 @@ class TestCaseAgent:
 【目标页面核心代码架构】
 {state.get('code_analysis', '无代码分析数据')}
 
-请必须结合以上真实的 DOM 结构图和代码逻辑结构，切实规划真实有效的测试用例清单，绝不要脱离页面特征凭空捏造。"""
+【目标页面原始源码全貌】
+```
+{state.get('source_code') or '由于缺少文件路径，未能加载源码'}
+```
+
+请结合以上真实的 DOM 结构图和源码，产出最合理数量的测试用例流。保持每个用例的功能聚焦即可，严禁使用 "..." 占位！"""
             try:
-                response = await self.config.llm_caller([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
-                response = response.strip()
-                
-                # 增强型 JSON Array 提取器
-                match = re.search(r'\[\s*\{.*?\}\s*\]', response, re.DOTALL)
-                if match:
-                    response = match.group(0)
-                elif '```json' in response.lower():
-                    response = response.split('```')[1].replace('json', '', 1).strip()
-                elif '```' in response:
-                    response = response.split('```')[1].strip()
+                if self.config.structured_llm_caller:
+                    result_obj = await self.config.structured_llm_caller(
+                        [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], 
+                        PlannedCasesOutput
+                    )
+                    planned_cases = [case.model_dump() for case in result_obj.cases]
+                else:
+                    response = await self.config.llm_caller([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
+                    response = response.strip()
                     
-                planned_cases = json.loads(response)
+                    # 容错：直接尝试提取 cases 的数组
+                    # 增强型 JSON Array 兜底解析：即使大模型带有 thought，我们也只去找带有 [ ] 的 cases 内容
+                    match = re.search(r'"cases"\s*:\s*(\[.*?\])\s*\}?', response, re.DOTALL)
+                    if match:
+                        planned_cases = json.loads(match.group(1))
+                    else:
+                        # 兜底到原来的提取
+                        fallback_match = re.search(r'\[.*\]', response, re.DOTALL)
+                        if fallback_match:
+                            planned_cases = json.loads(fallback_match.group(0))
+                        else:
+                            if '```json' in response.lower():
+                                content = response.split('```')[1].replace('json', '', 1).strip()
+                                data = json.loads(content)
+                                planned_cases = data.get("cases", data) if isinstance(data, dict) else data
+                            else:
+                                data = json.loads(response)
+                                planned_cases = data.get("cases", data) if isinstance(data, dict) else data
+                                
                 logs_delta.append(await self._log("success", f"✅ 计划完成，即将生成 {len(planned_cases)} 个流水线用例任务..."))
                 return {"planned_cases": planned_cases, "logs": logs_delta, "current_case_index": 0}
             except Exception as e:
-                err_msg = f"计划生成失败或JSON解析异常: {e}"
+                err_msg = f"计划生成失败或Schema解析异常: {e}"
                 logs_delta.append(await self._log("error", f"❌ {err_msg}"))
                 return {"error": err_msg, "logs": logs_delta}
 
@@ -183,6 +222,7 @@ class TestCaseAgent:
 1. 务必使用下方 Context 中提供的真实的CSS选择器，参考上述速查手册的标准语法。
 2. 在动手写 Python 代码之前，你必须使用 <thinking></thinking> 标签包裹你的思考过程（分析意图、决定查找哪些真实 DOM，使用何种断言）。
 3. 思考完毕后，严格按照下面的模板输出最终代码，绝对不要在代码块以外输出额外的中文闲聊！
+4. 你的这个 Python 文件中只能包含当前这 1 个测试用例，绝对不要将多个毫不相干的测试写在一块儿！
 
 输出格式模板必须严格遵循：
 <thinking>
@@ -195,7 +235,7 @@ class TestCaseAgent:
 import pytest
 from playwright.sync_api import Page, expect
 
-def test_{{描述业务逻辑的小写英文拼音简写}}(page: Page):
+def test_xxx_xxx(page: Page):
     # 你的所有测试动作与预期断言...
 ```"""
             feedback = state.get("current_case_feedback", "")
@@ -219,14 +259,19 @@ def test_{{描述业务逻辑的小写英文拼音简写}}(page: Page):
 【总局测试策略指导】
 {state.get('test_strategy', '无特定策略指导')}
 
-【目标页面工程级代码分析】
-{state.get('code_analysis', '无代码分析数据')}
-
 【目标页面运行时 DOM 树提取特征】
 {state.get('dom_analysis', '无DOM特征数据')}
+
+【目标页面核心代码架构分析】
+{state.get('code_analysis', '无代码分析数据')}
+
+【目标页面原始源码全貌】
+```
+{state.get('source_code') or '由于缺少文件路径，未能加载源码'}
+```
 =========================================
 
-请严格遵循上述 DOM 分析和代码结构中的真实 id, class 或 placeholder 编写精准打击的 Playwright 断言脚本。"""
+请严格匹配源码中绑定的业务逻辑和 DOM 分析提供的真实 id / class / placeholder 等特征，编写出精准打击的 Playwright 断言脚本。"""
             try:
                 response = await self.config.llm_caller([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
                 return {"raw_llm_response": response, "logs": logs_delta}
@@ -240,13 +285,15 @@ def test_{{描述业务逻辑的小写英文拼音简写}}(page: Page):
             code_str = state.get("raw_llm_response", "")
             logs_delta = []
             
-            is_valid, err_msg = validate_python_code(code_str)
             clean_code = code_str.strip()
             if "```" in clean_code:
                 try:
                      clean_code = re.search(r'```(?:python|py)?\s*(.*?)```', clean_code, re.DOTALL).group(1).strip()
                 except:
                      pass
+            
+            # 使用提取干净的 Python 代码块去执行词法审查
+            is_valid, err_msg = validate_python_code(clean_code)
             
             new_case = {
                 "title": task.get("title", f"测试用例 {idx+1}"),

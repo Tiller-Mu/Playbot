@@ -10,6 +10,8 @@ import {
 } from '@ant-design/icons-vue'
 import type { TestCase } from '../types'
 import { testcaseApi } from '../services/api'
+import { MdPreview } from 'md-editor-v3'
+import 'md-editor-v3/lib/preview.css'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,6 +22,7 @@ const loading = ref(false)
 const editLoading = ref(false)
 const saveLoading = ref(false)
 const showCode = ref(false)
+const isEditingCode = ref(false)
 const nlInstruction = ref('')
 
 async function loadCase() {
@@ -100,11 +103,29 @@ onMounted(loadCase)
       </a-card>
 
       <a-card v-if="testCase && showCode" style="margin-bottom: 16px;">
-        <template #title><CodeOutlined /> 测试脚本代码</template>
+        <template #title>
+          <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+            <span><CodeOutlined /> 测试脚本代码</span>
+            <a-button type="link" size="small" @click="isEditingCode = !isEditingCode">
+              {{ isEditingCode ? '退出编辑 (高亮模式)' : '手动修改代码' }}
+            </a-button>
+          </div>
+        </template>
+        
+        <MdPreview 
+          v-if="!isEditingCode"
+          :modelValue="`\`\`\`python\n${testCase.script_content || ''}\n\`\`\``" 
+          theme="dark" 
+          previewTheme="github"
+          codeTheme="github"
+          class="mcp-md-overrides"
+        />
+
         <a-textarea
+          v-else
           v-model:value="testCase.script_content"
           :rows="20"
-          style="font-family: 'Courier New', Consolas, monospace; font-size: 13px; line-height: 1.6;"
+          style="font-family: 'Courier New', Consolas, monospace; font-size: 13px; line-height: 1.6; background-color: #1e1e1e; color: #d4d4d4;"
         />
       </a-card>
 
@@ -133,3 +154,19 @@ onMounted(loadCase)
     </a-spin>
   </div>
 </template>
+<style scoped>
+/* 覆盖底层控件防止出现黑底白边，融入黑金背板 */
+:deep(.mcp-md-overrides .md-editor-previewOnly) {
+  background-color: transparent !important;
+}
+:deep(.mcp-md-overrides .md-editor-preview-wrapper) {
+  padding: 0 !important;
+}
+
+/* 强化代码注释，方便非开发者快速阅读意图 */
+:deep(.mcp-md-overrides .hljs-comment) {
+  color: #10b981 !important;
+  font-style: normal !important;
+  font-weight: 500 !important;
+}
+</style>
