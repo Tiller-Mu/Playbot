@@ -296,7 +296,7 @@ class RecordingSession:
         """设置页面级别的隐性交互和拓扑追踪监听"""
         page.on("dialog", lambda d: self._handle_dialog(d))
         page.on("filechooser", lambda fc: self._handle_filechooser(fc))
-        page.on("response", lambda r: self._handle_response(r))
+        page.on("response", lambda r: self._handle_response(r, page))
 
     def _handle_dialog(self, dialog):
         import time
@@ -325,14 +325,17 @@ class RecordingSession:
         })
         self.save()
 
-    def _handle_response(self, response):
+    def _handle_response(self, response, page=None):
         if response.request.resource_type in ["xhr", "fetch"]:
             import time
             if not hasattr(self, 'action_history'):
                 self.action_history = []
+                
+            page_url = page.url if page else response.url
+            
             self.action_history.append({
                 "time": time.time(),
-                "url": response.url, # API URL
+                "url": page_url, 
                 "statement": f"# XHR 响应: [{response.request.method}] {response.status} - {response.url}",
                 "raw_data": {
                     "action": "network_response",

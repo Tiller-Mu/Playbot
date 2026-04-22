@@ -163,8 +163,25 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
         # 按照产生的动作交互数量降序排序，选出最具代表性的页面作为主体节点
         anchor_route = sorted(route_action_counts.keys(), key=lambda r: route_action_counts[r], reverse=True)[0]
 
+    # 先将 action_history 按 route 分组
+    route_actions = {}
+    if action_history:
+        for action in action_history:
+            url = action.get('url', '')
+            if url:
+                route = getattr(session, '_normalize_url', lambda u: u)(url)
+                if route not in route_actions:
+                    route_actions[route] = []
+                route_actions[route].append(action)
+
     page_nodes = {}
     for route_pattern in unique_routes_dict.keys():
+        # 提取当前路由的活跃组件，辅助匹配
+        active_comps_for_route = set()
+        for act in route_actions.get(route_pattern, []):
+            if act.get('raw_data', {}).get('action') == 'active_components':
+                active_comps_for_route.update(act.get('raw_data', {}).get('value', []))
+                
         # 1. 寻找现有记录（精确匹配）
         existing_page = None
         search_patterns = [route_pattern]
@@ -179,7 +196,7 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
         )
         existing_page = page_result.scalar_one_or_none()
         
-        # 2. 寻找具有源码路径的静态页面（动态路由正则匹配）
+        # 2. 寻找具有源码路径的静态页面（动态路由正则匹配或组件名匹配）
         static_page = None
         for sp in all_static_pages:
             sp_path = sp.full_path
@@ -195,18 +212,22 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
                 if re.match(regex, route_pattern):
                     static_page = sp
                     break
+                    
+        # 3. 增强匹配：如果正则也没匹配上，但该页面渲染的活跃组件名与某个静态页面名吻合，则认为是同一个页面
+        if not static_page and active_comps_for_route:
+            for sp in all_static_pages:
+                if sp.name in active_comps_for_route:
+                    static_page = sp
+                    break
 
         page_node = None
         if existing_page:
             existing_page.is_captured = True
-            if static_page:
-                if not existing_page.file_path:
-                    existing_page.file_path = static_page.file_path
-                if not existing_page.component_name or existing_page.component_name == '[]':
-                    existing_page.component_name = static_page.component_name
-                if not existing_page.imported_components:
-                    existing_page.imported_components = static_page.imported_components
             page_node = existing_page
+        elif static_page:
+            # 核心修复：如果找到了对应的静态页面，直接挂载到该节点，而不是创建新页面
+            static_page.is_captured = True
+            page_node = static_page
         else:
             new_page = TestPage(
                 project_id=project_id,
@@ -215,9 +236,6 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
                 full_path=route_pattern,
                 is_leaf=True,
                 is_captured=True,
-                file_path=static_page.file_path if static_page else None,
-                component_name=static_page.component_name if static_page else None,
-                imported_components=static_page.imported_components if static_page else None,
                 description=f"通过录制自动发现跨页用例关联的页面: {route_pattern}"
             )
             db.add(new_page)
@@ -233,16 +251,6 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
         from app.models.semantic_ir import IntentPlan
         from app.models.database import ActionTrace
         from datetime import datetime
-        
-        # 将 action_history 按 route 分组
-        route_actions = {}
-        for action in action_history:
-            url = action.get('url', '')
-            if url:
-                route = getattr(session, '_normalize_url', lambda u: u)(url)
-                if route not in route_actions:
-                    route_actions[route] = []
-                route_actions[route].append(action)
                 
         for route_pattern, actions in route_actions.items():
             if route_pattern not in page_nodes:
@@ -251,14 +259,15 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
             page_node = page_nodes[route_pattern]
             normalized_steps = ActionNormalizer.normalize(actions)
             
-            if not normalized_steps:
-                continue
-        
             # 提取活跃组件计算覆盖率
             active_comps = set()
             for act in actions:
                 if act.get('raw_data', {}).get('action') == 'active_components':
                     active_comps.update(act.get('raw_data', {}).get('value', []))
+                    
+            # 核心修复：即使用户没有进行实质交互（normalized_steps为空），只要页面被渲染了（有活跃组件），也应该保存一条访问轨迹
+            if not normalized_steps and not active_comps:
+                continue
             
             # 计算漏测覆盖率
             imported_comps = []
@@ -283,6 +292,7 @@ async def stop_recording(project_id: str, db: AsyncSession = Depends(get_db)):
             new_trace = ActionTrace(
                 project_id=project_id,
                 page_id=page_node.id,
+
                 title=f"录制轨迹 {datetime.now().strftime('%m-%d %H:%M')}",
                 description=f"已由 Action Normalizer 转化为 Semantic IR。本页面操作覆盖了 {len(active_comps)} 个组件。",
                 trace_data=semantic_json
