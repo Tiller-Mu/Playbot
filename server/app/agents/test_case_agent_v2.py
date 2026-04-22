@@ -11,48 +11,36 @@ import os
 import re
 
 from langgraph.graph import StateGraph, END
+from jinja2 import Environment, FileSystemLoader
 
 from .tools import CodeAnalyzerTool, DOMExtractorTool, TestStrategyTool
 from .langfuse_utils import get_langfuse_callback_handler
 from .schemas import AgentConfig, TestCaseInput
-from .utils.python_validator import validate_python_code
-from pydantic import BaseModel, Field
-
-
-class SingleCasePlan(BaseModel):
-    title: str = Field(description="测试用例标题，注意要用人类可读的短语，严禁使用...占位符。")
-    description: str = Field(description="该用例执行的具体测试意图、断点和操作流程描述。")
-
-class PlannedCasesOutput(BaseModel):
-    thought: str = Field(description="分析该页面特征与策略，输出为什么这么设计用例的思考与依据")
-    cases: list[SingleCasePlan] = Field(description="规划出的独立测试用例列表。请根据页面特征产出最合理数量的测试用例，自然拆分相关意图，无需刻意增减数量。")
-
+from app.schemas.test_schema import AgentTestBlueprint, TestCaseIntent, TestActionSchema
 
 class AgentState(TypedDict, total=False):
     input_data: TestCaseInput
     source_code: str
     dom_data: Any
-    code_analysis: str
-    dom_analysis: str
-    test_strategy: str
-    planned_cases: List[Dict[str, Any]]
-    current_case_index: int
-    current_case_feedback: str
-    retry_count: int
-    raw_llm_response: str
+    
+    page_summary: str
+    element_whitelist: Dict[str, Any]
+    
+    blueprint: AgentTestBlueprint
+    
     test_cases: Annotated[List[Dict[str, Any]], operator.add]
     logs: Annotated[List[str], operator.add]
     error: Optional[str]
-
 
 class TestCaseAgent:
     def __init__(self, config: AgentConfig, log_callback: Optional[Callable[[str, str], None]] = None):
         self.config = config
         self.log_callback = log_callback
-        self.code_tool = CodeAnalyzerTool()
-        self.dom_tool = DOMExtractorTool()
-        self.strategy_tool = TestStrategyTool()
         self.graph = self._build_graph()
+        
+        # Setup Jinja2 Environment
+        template_dir = os.path.join(os.path.dirname(__file__), 'templates')
+        self.jinja_env = Environment(loader=FileSystemLoader(template_dir))
     
     async def _log(self, level: str, message: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -62,8 +50,8 @@ class TestCaseAgent:
         return log_msg
     
     def _build_graph(self) -> StateGraph:
-        async def analyze_code(state: AgentState) -> dict:
-            logs_delta = [await self._log("info", "🔬 获取并分析代码结构...")]
+        async def understand_page(state: AgentState) -> dict:
+            logs_delta = [await self._log("info", "🔬 [步骤1] 大模型正在提取页面功能摘要...")]
             source_code = state.get("source_code")
             if not source_code:
                 file_path = state["input_data"].file_path
@@ -75,16 +63,7 @@ class TestCaseAgent:
                         logs_delta.append(await self._log("error", f"❌ 读取源码文件失败: {e}"))
                 else:
                     source_code = ""
-            try:
-                result = await self.code_tool.arun({"source_code": source_code, "file_path": state["input_data"].file_path or "", "analysis_depth": "basic"})
-                logs_delta.append(await self._log("info", "✅ 代码分析完成"))
-                return {"source_code": source_code, "code_analysis": result, "logs": logs_delta}
-            except Exception as e:
-                logs_delta.append(await self._log("error", f"❌ 代码分析失败: {e}"))
-                return {"error": f"代码分析失败: {e}", "source_code": source_code, "logs": logs_delta}
-        
-        async def analyze_dom(state: AgentState) -> dict:
-            logs_delta = [await self._log("info", "🔬 提取DOM元素特征...")]
+            
             dom_data = state.get("dom_data")
             if not dom_data:
                 json_path = state["input_data"].dom_json_path
@@ -92,265 +71,185 @@ class TestCaseAgent:
                     try:
                         with open(json_path, "r", encoding="utf-8") as f:
                             dom_data = json.load(f)
-                    except Exception as e:
+                    except:
                         pass
-            if not dom_data:
-                return {"dom_data": None, "dom_analysis": "无DOM数据", "logs": logs_delta}
+
+            system_prompt = "你是一个专业的前端功能分析师。请根据提供的 Vue/HTML 源码和 DOM 结构，用不超过 50 个字的简练中文，总结这个页面的核心作用和主要的交互区域。"
+            user_prompt = f"【源码】\n```\n{source_code[:5000]}\n```\n\n【DOM概览】\n{str(dom_data)[:2000]}"
+            
             try:
-                dom_str = json.dumps(dom_data, ensure_ascii=False) if not isinstance(dom_data, str) else dom_data
-                result = await self.dom_tool.arun({"dom_data": dom_str, "extract_type": "interactive"})
-                logs_delta.append(await self._log("info", "✅ DOM分析提取完成"))
-                return {"dom_data": dom_data, "dom_analysis": result, "logs": logs_delta}
+                response = await self.config.llm_caller([
+                    {"role": "system", "content": system_prompt}, 
+                    {"role": "user", "content": user_prompt}
+                ])
+                logs_delta.append(await self._log("success", f"✅ 页面理解完成: {response.strip()}"))
+                return {"page_summary": response.strip(), "source_code": source_code, "dom_data": dom_data, "logs": logs_delta}
             except Exception as e:
-                logs_delta.append(await self._log("error", f"❌ DOM分析失败: {e}"))
-                return {"error": f"DOM分析失败: {e}", "dom_data": dom_data, "logs": logs_delta}
+                logs_delta.append(await self._log("error", f"❌ 页面理解失败: {e}"))
+                return {"error": f"页面理解失败: {e}", "logs": logs_delta}
         
-        async def analyze_strategy(state: AgentState) -> dict:
-            logs_delta = [await self._log("info", "🎯 分析测试策略...")]
-            try:
-                result = await self.strategy_tool.arun({
-                    "code_analysis": state.get("code_analysis", ""),
-                    "dom_analysis": state.get("dom_analysis", ""),
-                    "page_path": state["input_data"].file_path or ""
-                })
-                logs_delta.append(await self._log("info", "✅ 策略分析完成"))
-                return {"test_strategy": result, "logs": logs_delta}
-            except Exception as e:
-                logs_delta.append(await self._log("error", f"❌ 策略分析失败: {e}"))
-                return {"error": f"策略分析失败: {e}", "logs": logs_delta}
-        
-        async def plan_cases(state: AgentState) -> dict:
-            logs_delta = [await self._log("info", "📝 正在制定测试用例大纲计划...")]
-            system_prompt = """你是一个专业的Playwright测试架构师。
-基于提供的策略分析和页面全量信息，分解出你需要编写的各个单一测试用例计划。
-要求：基于页面的模块逻辑，产出最合理数量的、能够独立运行的测试大纲（只需覆盖真实的核心正反向场景，不过度拆分，也不盲目合并），包含该测试的标题和具体的意图说明。
-严禁使用 "..." 等省略号，每个用例都必须具备完整的意图！
+        async def extract_whitelist(state: AgentState) -> dict:
+            logs_delta = [await self._log("info", "⚙️ [步骤2] 本地提取控件物理坐标白名单...")]
+            dom_data = state.get("dom_data")
+            whitelist = {}
+            if dom_data:
+                # 解析 dom_data 寻找 interactives
+                interactive = []
+                if isinstance(dom_data, dict):
+                    interactive = dom_data.get('interactive_elements', [])
+                elif isinstance(dom_data, list):
+                    interactive = dom_data
+                
+                # 建立安全白名单字典
+                for i, elem in enumerate(interactive):
+                    elem_id = f"ELEM_{i:03d}"
+                    placeholder = elem.get("placeholder", "").strip()
+                    text_content = elem.get("text", "").strip()
+                    html_id = elem.get("id", "").strip()
+                    tag = elem.get("tag", "").lower()
+                    
+                    if html_id:
+                        selector = f"locator('#{html_id}')"
+                    elif placeholder:
+                        safe_ph = placeholder.replace('"', '\\"')
+                        selector = f'get_by_placeholder("{safe_ph}").first'
+                    elif text_content and tag in ['button', 'a']:
+                        safe_text = text_content.replace('"', '\\"')
+                        role = "link" if tag == 'a' else "button"
+                        selector = f'get_by_role("{role}", name="{safe_text}").first'
+                    elif text_content:
+                        safe_text = text_content.replace('"', '\\"')
+                        selector = f'get_by_text("{safe_text}").first'
+                    else:
+                        raw_sel = elem.get("selector", "")
+                        if not raw_sel:
+                            if elem.get("class"): raw_sel = f".{elem.get('class').split()[0]}"
+                            else: raw_sel = tag
+                        safe_sel = raw_sel.replace('"', '\\"')
+                        selector = f'locator("{safe_sel}").first'
+                    
+                    attrs = elem.get("attributes", {}) or {}
+                    # Try to deduce readonly from attr, class, or unselectable
+                    is_readonly = attrs.get("readonly") is not None or "readonly" in elem.get("class", "") or attrs.get("unselectable") == "on"
+                    role = attrs.get("role", "")
+                    
+                    whitelist[elem_id] = {
+                        "tag": elem.get("tag", "unknown"),
+                        "text": elem.get("text", "")[:30],
+                        "selector": selector,
+                        "type": elem.get("type", ""),
+                        "role": role,
+                        "readonly": is_readonly
+                    }
+            
+            logs_delta.append(await self._log("info", f"✅ 白名单提取完成，共获得 {len(whitelist)} 个可用靶标。"))
+            return {"element_whitelist": whitelist, "logs": logs_delta}
+            
+        async def plan_and_orchestrate(state: AgentState) -> dict:
+            logs_delta = [await self._log("info", "🧠 [步骤3] 调度大模型输出结构化意图 JSON...")]
+            summary = state.get("page_summary", "")
+            whitelist = state.get("element_whitelist", {})
+            
+            # Format whitelist for LLM
+            whitelist_str_lines = []
+            for k, v in whitelist.items():
+                desc = f"[{k}] 标签: <{v['tag']}>"
+                if v['type']: desc += f" 类型: {v['type']}"
+                if v['role']: desc += f" 角色: {v['role']}"
+                if v.get('readonly'): desc += f" [⚠️只读状态(不能fill,请改用click)]"
+                if v['text']: desc += f" 文本/内容: '{v['text']}'"
+                whitelist_str_lines.append(desc)
+            whitelist_str = "\n".join(whitelist_str_lines)
+            
+            system_prompt = """你是一个专业的自动化测试架构师。
+你的任务是根据给定的页面摘要和严酷限定的【元素字典（白名单）】，设计出涵盖正向与异常流的测试用例集。
+【核心规则】：
+1. 所有的动作 target_id MUST 且 ONLY 能从下方给定的白名单 ID (如 ELEM_001) 中选取！严禁随意自创 ID！如果某个元素不在白名单里，请调整测试策略避开它。
+2. 动作必须明确且颗粒度足够，比如 fill 值之后记得 click 提交。
+3. 遇到组件库渲染的 下拉框/选项(combobox) 或 带有 [⚠️只读] 标记的输入框时，绝对不要使用 fill 试图填充（会引发不可控的 Playwright Timeout），必须改用明确的 click 点击展开，然后紧跟下一个选项的 click。
+4. 【无断言不测试】：在每个测试用例的关键操作（如点击提交、保存、搜索等）之后，你**必须**使用大纲里的断言动作（如 `expect_visible`, `expect_text`）来验证预期结果！找白名单里可能出现的弹窗提示或结果文本做断言目标！没有断言的用例是全瞎的！"""
+            
+            user_prompt = f"""【页面核心功能摘要】:
+{summary}
 
-【强制响应格式要求】
-你必须且仅能返回一个包含双通道数据的纯净 JSON 对象！绝不允许使用 ```json 等 Markdown 标记块结构来包裹数据！！
-首先在 `thought` 字段中写下你的深度推理和决策，最后在 `cases` 字段中输出最终用例！
-示例：
-{
-  "thought": "页面拥有完整的登录树和设置选项卡，应该分别测试...",
-  "cases": [
-    {"title": "测试保存设置", "description": "测试正常的保存流验证"}
-  ]
-}"""
-            user_prompt = f"""【测试策略总旨】
-{state.get('test_strategy', '')}
+【可利用的元素字典（白名单）】:
+{whitelist_str}
 
-【目标页面运行时 DOM 树特征】
-{state.get('dom_analysis', '无DOM特征数据')}
-
-【目标页面核心代码架构】
-{state.get('code_analysis', '无代码分析数据')}
-
-【目标页面原始源码全貌】
-```
-{state.get('source_code') or '由于缺少文件路径，未能加载源码'}
-```
-
-请结合以上真实的 DOM 结构图和源码，产出最合理数量的测试用例流。保持每个用例的功能聚焦即可，严禁使用 "..." 占位！"""
+请输出完整的 TestCaseIntent 测试图纸！"""
+            
             try:
                 if self.config.structured_llm_caller:
-                    result_obj = await self.config.structured_llm_caller(
+                    blueprint = await self.config.structured_llm_caller(
                         [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], 
-                        PlannedCasesOutput
+                        AgentTestBlueprint
                     )
-                    planned_cases = [case.model_dump() for case in result_obj.cases]
                 else:
-                    response = await self.config.llm_caller([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
-                    response = response.strip()
+                    raise Exception("当前模型接口未绑定 structured_llm_caller!")
                     
-                    # 容错：直接尝试提取 cases 的数组
-                    # 增强型 JSON Array 兜底解析：即使大模型带有 thought，我们也只去找带有 [ ] 的 cases 内容
-                    match = re.search(r'"cases"\s*:\s*(\[.*?\])\s*\}?', response, re.DOTALL)
-                    if match:
-                        planned_cases = json.loads(match.group(1))
-                    else:
-                        # 兜底到原来的提取
-                        fallback_match = re.search(r'\[.*\]', response, re.DOTALL)
-                        if fallback_match:
-                            planned_cases = json.loads(fallback_match.group(0))
-                        else:
-                            if '```json' in response.lower():
-                                content = response.split('```')[1].replace('json', '', 1).strip()
-                                data = json.loads(content)
-                                planned_cases = data.get("cases", data) if isinstance(data, dict) else data
-                            else:
-                                data = json.loads(response)
-                                planned_cases = data.get("cases", data) if isinstance(data, dict) else data
-                                
-                logs_delta.append(await self._log("success", f"✅ 计划完成，即将生成 {len(planned_cases)} 个流水线用例任务..."))
-                return {"planned_cases": planned_cases, "logs": logs_delta, "current_case_index": 0}
+                cases_count = len(blueprint.test_cases)
+                logs_delta.append(await self._log("success", f"✅ 意图图纸设计完成，包含 {cases_count} 个用例流水线。"))
+                return {"blueprint": blueprint, "logs": logs_delta}
             except Exception as e:
-                err_msg = f"计划生成失败或Schema解析异常: {e}"
-                logs_delta.append(await self._log("error", f"❌ {err_msg}"))
-                return {"error": err_msg, "logs": logs_delta}
-
-        async def generate_single_case(state: AgentState) -> dict:
-            idx = state.get("current_case_index", 0)
-            cases = state.get("planned_cases", [])
-            if idx >= len(cases): return {}
-            current_task = cases[idx]
-            retry = state.get("retry_count", 0)
-            logs_delta = []
+                logs_delta.append(await self._log("error", f"❌ 意图大纲生成失败: {e}"))
+                return {"error": f"意图大纲生成失败: {e}", "logs": logs_delta}
+                
+        async def compile_to_python(state: AgentState) -> dict:
+            blueprint = state.get("blueprint")
+            whitelist = state.get("element_whitelist", {})
+            logs_delta = [await self._log("info", "🏭 [步骤4] 启动 Jinja2 组装引擎，生成安全沙盒代码...")]
             
-            if retry == 0:
-                logs_delta.append(await self._log("info", f"🔨 [子任务 {idx+1}/{len(cases)}] 开始编写: {current_task.get('title')}"))
-            else:
-                logs_delta.append(await self._log("warning", f"⚠️ [用例 {idx+1}/{len(cases)}] 第 {retry} 次重修: {current_task.get('title')}"))
-            
-            playwright_cheat_sheet = """
-【Playwright 常用语法速查手册 (Cheat Sheet)】
-• 定位元素: 
-  - page.locator(".class-name") / page.locator("#id") / page.locator("text=确认")
-  - page.get_by_role("button", name="提交")
-  - page.get_by_placeholder("请输入")
-• 常见动作: 
-  - locator.click() / locator.fill("text") / locator.press("Enter") 
-  - locator.hover() / locator.check()
-• 断言 (expect):
-  - expect(locator).to_be_visible() / expect(locator).not_to_be_empty()
-  - expect(locator).to_have_text("预期文本") / expect(locator).to_have_value("值")
-  - expect(page).to_have_url(re.compile(".*dashboard"))
-"""
-            system_prompt = f"""你是一个专业的Playwright测试用例编程专家。
-为一个具体的测试任务编写能够直接运行的独立Python脚本。
-{playwright_cheat_sheet}
-代码要求：
-1. 务必使用下方 Context 中提供的真实的CSS选择器，参考上述速查手册的标准语法。
-2. 在动手写 Python 代码之前，你必须使用 <thinking></thinking> 标签包裹你的思考过程（分析意图、决定查找哪些真实 DOM，使用何种断言）。
-3. 思考完毕后，严格按照下面的模板输出最终代码，绝对不要在代码块以外输出额外的中文闲聊！
-4. 你的这个 Python 文件中只能包含当前这 1 个测试用例，绝对不要将多个毫不相干的测试写在一块儿！
-
-输出格式模板必须严格遵循：
-<thinking>
-1. 需求分析：...
-2. 定位 DOM：用 page.locator("...") 还是 get_by_role...
-3. 断言设计：...
-</thinking>
-
-```python
-import pytest
-from playwright.sync_api import Page, expect
-
-def test_xxx_xxx(page: Page):
-    # 你的所有测试动作与预期断言...
-```"""
-            feedback = state.get("current_case_feedback", "")
-            if feedback:
-                user_prompt = f"""该测试任务在 Python AST 编译器审查中遭到了【报错打回】！
-【致命编译报错原因】：{feedback}
-【你上次抛出的病态代码】：
-{state.get('raw_llm_response', '')}
-
-> 请注意：上面的错误通常是因为你忘记导入库、缺少括号、缩进断裂，或者是在纯代码块中混入了中文解释性废话。
-> 请深呼吸，修复这个该死的错误，然后重新、严格、且仅仅输出通过了词法校验的独立 Python 代码块！！！"""
-            else:
-                user_prompt = f"""当前需编写的新测试子任务：
-【用例标题】：{current_task.get('title')}
-【核心意图】：{current_task.get('description')}
-
-================ Context ================
-【页面URL】: {state.get('input_data').page_url if state.get('input_data') else '无'}
-【本地代码路径】: {state.get('input_data').file_path if state.get('input_data') else '无'}
-
-【总局测试策略指导】
-{state.get('test_strategy', '无特定策略指导')}
-
-【目标页面运行时 DOM 树提取特征】
-{state.get('dom_analysis', '无DOM特征数据')}
-
-【目标页面核心代码架构分析】
-{state.get('code_analysis', '无代码分析数据')}
-
-【目标页面原始源码全貌】
-```
-{state.get('source_code') or '由于缺少文件路径，未能加载源码'}
-```
-=========================================
-
-请严格匹配源码中绑定的业务逻辑和 DOM 分析提供的真实 id / class / placeholder 等特征，编写出精准打击的 Playwright 断言脚本。"""
+            test_cases = []
             try:
-                response = await self.config.llm_caller([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}])
-                return {"raw_llm_response": response, "logs": logs_delta}
+                template = self.jinja_env.get_template('playwright_test.py.j2')
+                
+                # 扁平化映射表用于模板查找
+                mapping = {k: v["selector"] for k, v in whitelist.items()}
+                
+                import uuid
+                
+                for i, case in enumerate(blueprint.test_cases):
+                    case_uid = str(uuid.uuid4()).replace('-', '_')[:8]
+                    # 渲染 Jinja
+                    script_content = template.render(
+                        case_uid=case_uid,
+                        case_title=case.title,
+                        case_description=case.description,
+                        base_url=state.get("input_data").page_url if state.get("input_data") else "http://localhost",
+                        steps=case.steps,
+                        mapping=mapping
+                    )
+                    
+                    test_cases.append({
+                        "title": case.title,
+                        "description": case.description,
+                        "script_content": script_content.strip(),
+                        "enabled": True
+                    })
+                    
+                logs_delta.append(await self._log("success", f"✅ 印刷厂流水线完成，所有 Python 代码已组装落库！"))
+                return {"test_cases": test_cases, "logs": logs_delta}
             except Exception as e:
-                logs_delta.append(await self._log("error", f"❌ 编码流水线故障: {e}"))
-                return {"error": f"编码流水线故障: {e}", "logs": logs_delta}
-
-        async def validate_single_case(state: AgentState) -> dict:
-            idx = state.get("current_case_index", 0)
-            task = state.get("planned_cases", [])[idx]
-            code_str = state.get("raw_llm_response", "")
-            logs_delta = []
-            
-            clean_code = code_str.strip()
-            if "```" in clean_code:
-                try:
-                     clean_code = re.search(r'```(?:python|py)?\s*(.*?)```', clean_code, re.DOTALL).group(1).strip()
-                except:
-                     pass
-            
-            # 使用提取干净的 Python 代码块去执行词法审查
-            is_valid, err_msg = validate_python_code(clean_code)
-            
-            new_case = {
-                "title": task.get("title", f"测试用例 {idx+1}"),
-                "description": task.get("description", ""),
-                "script_content": clean_code,
-                "enabled": True
-            }
-            if is_valid:
-                logs_delta.append(await self._log("success", f"✅ [用例 {idx+1}] 编译验证完美通过，收录投产。"))
-                return {"test_cases": [new_case], "current_case_index": idx + 1, "retry_count": 0, "current_case_feedback": "", "logs": logs_delta}
-            else:
-                retry = state.get("retry_count", 0)
-                if retry < 3:
-                    logs_delta.append(await self._log("warning", f"🚨 [用例 {idx+1}] 查杀出语法错误，已打回大模型复写重修。"))
-                    return {"retry_count": retry + 1, "current_case_feedback": err_msg, "logs": logs_delta}
-                else:
-                    logs_delta.append(await self._log("error", f"❌ [用例 {idx+1}] 连续3次重修失败，已禁用该残次用例存查。"))
-                    new_case["enabled"] = False
-                    new_case["script_content"] = f"# ⚠️ 智能体巡检警告：经历了多次尝试仍然抱撼编译，请人工介入修复以下原由：\n# {err_msg}\n\n{new_case['script_content']}"
-                    return {"test_cases": [new_case], "current_case_index": idx + 1, "retry_count": 0, "current_case_feedback": "", "logs": logs_delta}
+                logs_delta.append(await self._log("error", f"❌ Jinja2 渲染失败: {e}"))
+                return {"error": f"代码渲染失败: {e}", "logs": logs_delta}
+                
 
         def route_after_step(state: AgentState) -> str:
             if state.get("error"): return "error_end"
             return "next"
-            
-        def route_after_planner(state: AgentState) -> str:
-            if state.get("error"): return "error_end"
-            planned_cases = state.get("planned_cases", [])
-            if not planned_cases or len(planned_cases) == 0:
-                return "error_end"
-            return "generate_single_case"
-
-        def route_after_validate(state: AgentState) -> str:
-            if state.get("error"): return "error_end"
-            if state.get("current_case_feedback"): return "generate_single_case"
-            idx = state.get("current_case_index", 0)
-            total = len(state.get("planned_cases", []))
-            if idx < total: return "generate_single_case"
-            return "success_end"
 
         workflow = StateGraph(AgentState)
-        workflow.add_node("analyze_code", analyze_code)
-        workflow.add_node("analyze_dom", analyze_dom)
-        workflow.add_node("analyze_strategy", analyze_strategy)
-        workflow.add_node("plan_cases", plan_cases)
-        workflow.add_node("generate_single_case", generate_single_case)
-        workflow.add_node("validate_single_case", validate_single_case)
-        workflow.set_entry_point("analyze_code")
+        workflow.add_node("understand_page", understand_page)
+        workflow.add_node("extract_whitelist", extract_whitelist)
+        workflow.add_node("plan_and_orchestrate", plan_and_orchestrate)
+        workflow.add_node("compile_to_python", compile_to_python)
         
-        workflow.add_conditional_edges("analyze_code", route_after_step, {"error_end": END, "next": "analyze_dom"})
-        workflow.add_conditional_edges("analyze_dom", route_after_step, {"error_end": END, "next": "analyze_strategy"})
-        workflow.add_conditional_edges("analyze_strategy", route_after_step, {"error_end": END, "next": "plan_cases"})
-        workflow.add_conditional_edges("plan_cases", route_after_planner, {"error_end": END, "generate_single_case": "generate_single_case"})
-        workflow.add_edge("generate_single_case", "validate_single_case")
-        workflow.add_conditional_edges("validate_single_case", route_after_validate, {
-            "error_end": END, "generate_single_case": "generate_single_case", "success_end": END
-        })
+        workflow.set_entry_point("understand_page")
+        
+        workflow.add_conditional_edges("understand_page", route_after_step, {"error_end": END, "next": "extract_whitelist"})
+        workflow.add_conditional_edges("extract_whitelist", route_after_step, {"error_end": END, "next": "plan_and_orchestrate"})
+        workflow.add_conditional_edges("plan_and_orchestrate", route_after_step, {"error_end": END, "next": "compile_to_python"})
+        workflow.add_conditional_edges("compile_to_python", route_after_step, {"error_end": END, "next": END})
+        
         return workflow.compile()
     
     def _create_initial_state(self, input_data: TestCaseInput) -> AgentState:
@@ -358,14 +257,8 @@ def test_xxx_xxx(page: Page):
             "input_data": input_data,
             "source_code": input_data.source_code or "",
             "dom_data": input_data.dom_data,
-            "code_analysis": "",
-            "dom_analysis": "",
-            "test_strategy": "",
-            "planned_cases": [],
-            "current_case_index": 0,
-            "current_case_feedback": "",
-            "retry_count": 0,
-            "raw_llm_response": "",
+            "page_summary": "",
+            "element_whitelist": {},
             "test_cases": [],
             "logs": [],
             "error": None
@@ -380,12 +273,12 @@ def test_xxx_xxx(page: Page):
         return {"callbacks": [lh]} if lh else {}
 
     async def generate(self, input_data: TestCaseInput) -> Dict[str, Any]:
-        await self._log("info", "🤖 智能体开始工作...")
+        await self._log("info", "🚀 绝地反击：工业级 JSON-DSL 意图执行剥离架构启动！...")
         invoke_config = self._get_invoke_config()
         if invoke_config: await self._log("info", "📊 Langfuse 追踪回调已挂载")
         try:
             final_state = await self.graph.ainvoke(self._create_initial_state(input_data), config=invoke_config)
-            if invoke_config: await self._log("info", "📊 Langfuse 追踪图状态流已结束")
+            
             try:
                 import langfuse
                 langfuse.flush()
@@ -396,9 +289,9 @@ def test_xxx_xxx(page: Page):
             return {
                 "test_cases": final_state.get("test_cases", []),
                 "analysis": {
-                    "code": final_state.get("code_analysis", ""),
-                    "dom": final_state.get("dom_analysis", ""),
-                    "strategy": final_state.get("test_strategy", "")
+                    "code": final_state.get("page_summary", ""),
+                    "dom": "白名单已提取: " + str(len(final_state.get("element_whitelist", {}))) + " 个",
+                    "strategy": "已使用 JSON 意图图纸编排"
                 },
                 "generated_count": len(final_state.get("test_cases", [])),
                 "error": final_state.get("error")

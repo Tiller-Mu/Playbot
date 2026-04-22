@@ -182,6 +182,7 @@ onMounted(loadSettings)
         <a-form layout="vertical">
           <a-form-item label="模型厂商" required>
             <a-select
+              id="provider-select"
               v-model:value="selectedProvider"
               placeholder="请选择模型厂商"
               style="width: 100%"
@@ -194,6 +195,7 @@ onMounted(loadSettings)
           
           <a-form-item label="模型版本" required>
             <a-select
+              id="model-select"
               v-model:value="selectedModel"
               placeholder="请选择模型版本"
               style="width: 100%"
@@ -207,6 +209,7 @@ onMounted(loadSettings)
           
           <a-form-item label="API 端点 (Endpoint)" required>
             <a-input
+              id="api-endpoint-input"
               v-model:value="form.llm_endpoint"
               placeholder="https://api.openai.com/v1"
             />
@@ -217,6 +220,7 @@ onMounted(loadSettings)
           
           <a-form-item label="API Key" required>
             <a-input-password
+              id="api-key-input"
               v-model:value="form.llm_api_key"
               placeholder="请输入 API Key"
             />
@@ -224,10 +228,10 @@ onMounted(loadSettings)
           
           <a-form-item>
             <a-space>
-              <a-button type="primary" @click="handleSave" :loading="saveLoading">
+              <a-button id="btn-save" type="primary" @click="handleSave" :loading="saveLoading">
                 <SaveOutlined /> 保存设置
               </a-button>
-              <a-button @click="handleVerify" :loading="verifyLoading">
+              <a-button id="btn-verify" @click="handleVerify" :loading="verifyLoading">
                 <ApiOutlined /> 验证连接
               </a-button>
             </a-space>

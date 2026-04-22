@@ -142,6 +142,23 @@ onUnmounted(() => {
         <template v-if="column.key === 'duration'">
           {{ record.duration_ms ? (record.duration_ms / 1000).toFixed(1) + 's' : '-' }}
         </template>
+        <template v-if="column.key === 'error'">
+          <template v-if="record.error_message">
+            <a-popover title="错误详情" trigger="click" placement="left">
+              <template #content>
+                 <div style="max-width: 800px; max-height: 500px; overflow: auto; padding-right: 8px;">
+                   <a-typography-paragraph :content="record.error_message" copyable style="margin-bottom: 8px;" />
+                   <pre style="margin: 0; white-space: pre-wrap; font-size: 13px; font-family: monospace; user-select: text;">{{ record.error_message }}</pre>
+                 </div>
+              </template>
+              <a-button type="link" danger size="small" style="padding: 0;">报错详情</a-button>
+            </a-popover>
+            <span style="color: #ff4d4f; font-size: 13px; margin-left: 8px; cursor: pointer;">
+              {{ record.error_message.split('\n')[0].substring(0, 40) }}...
+            </span>
+          </template>
+          <span v-else>-</span>
+        </template>
       </template>
     </a-table>
   </div>

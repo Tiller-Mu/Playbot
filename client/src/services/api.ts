@@ -27,9 +27,9 @@ export const pageApi = {
     api.post<TestCase[]>(`/pages/${pageId}/generate`).then(r => r.data),
   getCases: (pageId: string) => 
     api.get<TestCase[]>(`/pages/${pageId}/cases`).then(r => r.data),
-  // MCP生成用例
-  mcpGenerateCases: (pageId: string) => 
-    api.post<TestCase[]>(`/pages/${pageId}/generate`).then(r => r.data),
+  // 获取页面的录制行为轨迹
+  getTraces: (pageId: string) => 
+    api.get<any[]>(`/pages/${pageId}/traces`).then(r => r.data),
   // 智能体生成用例（LangGraph）
   generateWithAgent: (pageId: string) => 
     api.post<{
@@ -68,12 +68,6 @@ export const generateApi = {
   // MCP 页面嗅探（静态分析）
   mcpDiscover: (projectId: string) =>
     api.post<{ message: string; page_count: number; pages: any[] }>('/generate/mcp/discover', { project_id: projectId }).then(r => r.data),
-  // 单页 LLM 分析
-  analyzePage: (pageId: string) =>
-    api.post<{ success: boolean; page_id: string; description: string; interactive_elements: any[]; modals: any[]; forms: any[] }>(`/generate/mcp/analyze-page/${pageId}`).then(r => r.data),
-  // 为单个页面生成用例
-  mcpGeneratePageCases: (pageId: string) =>
-    api.post<TestCase[]>(`/generate/mcp/${pageId}/generate`).then(r => r.data),
   // 获取组件列表
   getComponents: (projectId: string) =>
     api.get<{ components: any[]; page_components: any[]; common_components: any[]; framework: string; entry_points: string[] }>(`/generate/components/${projectId}`).then(r => r.data),
@@ -106,7 +100,7 @@ export const recordingApi = {
   stop: (projectId: string) =>
     api.post<{ message: string; status: string; report: any }>(`/recording/${projectId}/stop`).then(r => r.data),
   getStatus: (projectId: string) =>
-    api.get<{ status: string; discovered_count: number; discovered_pages: string[]; duration: number }>(`/recording/${projectId}/status`).then(r => r.data),
+    api.get<{ status: string; action_count: number; actions: any[]; duration: number }>(`/recording/${projectId}/status`).then(r => r.data),
   capture: (projectId: string, url: string) =>
     api.post<{ message: string; route_pattern: string; total_discovered: number }>(`/recording/${projectId}/capture`, { url }).then(r => r.data),
   clearSession: (projectId: string) =>

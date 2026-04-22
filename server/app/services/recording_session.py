@@ -13,38 +13,252 @@ logger = logging.getLogger(__name__)
 
 # 全局注入的高级 DOM 结构化提取器（完全兼容后端的智能模型节点）
 EXTRACT_DOM_JS = """
-() => {
-    const elements = [];
-    const selectors = [
-        'button', 'input', 'select', 'textarea', 
-        'a[href]', '[role="button"]', '[role="tab"]', 
-        '[role="checkbox"]', '[role="radio"]', 
-        '[onclick]', '[tabindex="0"]'
-    ];
-    selectors.forEach(selector => {
-        document.querySelectorAll(selector).forEach(el => {
-            const rect = el.getBoundingClientRect();
-            if (rect.width > 0 && rect.height > 0) {
-                elements.push({
-                    tag: el.tagName.toLowerCase(),
-                    type: el.type || el.getAttribute('role') || '',
-                    id: el.id || '',
-                    class: typeof el.className === 'string' ? el.className : '',
-                    text: (el.innerText || '').substring(0, 100),
-                    placeholder: el.placeholder || '',
-                    value: el.value || '',
-                    selector: `${el.tagName.toLowerCase()}${el.id ? '#'+el.id : ''}${typeof el.className === 'string' && el.className ? '.'+el.className.trim().replace(/\s+/g, '.') : ''}`
-                });
+// 高鲁棒性注入探测器
+if (!window._playbotInitialized) {
+    window._playbotInitialized = true;
+    
+    function extractData(el) {
+        try {
+            const attrs = {};
+            if (el && el.attributes) {
+                for (let i = 0; i < el.attributes.length; i++) {
+                    attrs[el.attributes[i].name] = el.attributes[i].value;
+                }
             }
+            
+            let path = el.tagName ? el.tagName.toLowerCase() : 'unknown';
+            let current = el;
+            while (current && current.parentElement) {
+                current = current.parentElement;
+                path = (current.tagName ? current.tagName.toLowerCase() : '') + ' > ' + path;
+            }
+            
+            let componentName = null;
+            if (el && el.closest) {
+                const compEl = el.closest('[data-playbot-component]');
+                if (compEl) {
+                    componentName = compEl.getAttribute('data-playbot-component');
+                }
+            }
+
+            return {
+                tag: el.tagName ? el.tagName.toLowerCase() : 'unknown',
+                text: ((el.innerText || el.value || '') + '').substring(0, 100),
+                attrs: attrs,
+                path: path,
+                component: componentName,
+                url: window.location.href
+            };
+        } catch (e) {
+            return { tag: 'error', text: String(e.message), attrs: {}, path: '', component: null, url: window.location.href };
+        }
+    }
+    
+    function showToast(msg, bgColor = '#52c41a') {
+        const id = 'playbot-notification-box';
+        let el = document.getElementById(id);
+        if (el) el.remove();
+        el = document.createElement('div');
+        el.id = id;
+        el.textContent = msg;
+        Object.assign(el.style, {
+            position: 'fixed', top: '10px', left: '50%', transform: 'translateX(-50%)',
+            padding: '10px 24px', backgroundColor: bgColor, color: 'white', borderRadius: '6px',
+            zIndex: '2147483647', fontWeight: 'bold', boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
+            pointerEvents: 'none', transition: 'opacity 0.4s ease', fontFamily: 'system-ui, sans-serif',
+            fontSize: '14px', textAlign: 'center', minWidth: '200px'
         });
+        document.documentElement.appendChild(el);
+        setTimeout(() => { if (el) { el.style.opacity = '0'; setTimeout(() => { if (el.parentNode) el.remove(); }, 400); } }, 2000);
+    }
+
+    // 1. Shadow DOM 穿透的 Click 捕获
+    document.addEventListener('click', (e) => {
+        try {
+            let originalTarget = e.composedPath ? e.composedPath()[0] : e.target;
+            let target = originalTarget;
+            while (target && target !== document.body && !['button', 'a', 'input'].includes(target.tagName ? target.tagName.toLowerCase() : '') && !(target.getAttribute && target.getAttribute('role')) && !(target.getAttribute && target.getAttribute('data-testid'))) {
+                target = target.parentElement;
+            }
+            if (!target || target === document.body) target = originalTarget;
+            
+            const data = extractData(target);
+            data.action = 'click';
+            if (window.playbotRecordAction) {
+                showToast('动作已记录: ' + data.action);
+                window.playbotRecordAction(data).catch(err => console.error(err));
+            }
+        } catch(err) {
+            if (window.playbotRecordAction) window.playbotRecordAction({action: 'error', error: String(err.message)});
+        }
+    }, true);
+    
+    window._playbotInputTimers = window._playbotInputTimers || {};
+    
+    const handleInputStr = (eTarget) => {
+        try {
+            if (eTarget && ['input', 'textarea', 'select'].includes(eTarget.tagName ? eTarget.tagName.toLowerCase() : '')) {
+                const data = extractData(eTarget);
+                data.action = 'input';
+                data.value = eTarget.value;
+                if (window.playbotRecordAction) {
+                    showToast('输入已捕获', '#1890ff');
+                    window.playbotRecordAction(data).catch(err => console.error(err));
+                }
+            }
+        } catch(err) {}
+    };
+
+    document.addEventListener('input', (e) => {
+        const target = e.composedPath ? e.composedPath()[0] : e.target;
+        if (!target) return;
+        target.dataset.playbotId = target.dataset.playbotId || ('P' + Date.now() + Math.random());
+        const id = target.dataset.playbotId;
+        clearTimeout(window._playbotInputTimers[id]);
+        window._playbotInputTimers[id] = setTimeout(() => { handleInputStr(target); }, 500);
+    }, true);
+    
+    document.addEventListener('change', (e) => {
+        const target = e.composedPath ? e.composedPath()[0] : e.target;
+        if (target && target.dataset) clearTimeout(window._playbotInputTimers[target.dataset.playbotId]);
+        handleInputStr(target);
+    }, true);
+
+    // 2. 键盘事件捕获 (Enter / Escape)
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === 'Escape') {
+            try {
+                let target = e.composedPath ? e.composedPath()[0] : e.target;
+                const data = extractData(target);
+                data.action = 'keydown';
+                data.value = e.key;
+                if (window.playbotRecordAction) window.playbotRecordAction(data).catch(err => {});
+            } catch(err) {}
+        }
+    }, true);
+    
+    // 3. Hover 悬停检测 (防抖)
+    let hoverTimer = null;
+    document.addEventListener('mouseover', (e) => {
+        const target = e.composedPath ? e.composedPath()[0] : e.target;
+        if (!target || target === document.body || target === document.documentElement) return;
+        clearTimeout(hoverTimer);
+        hoverTimer = setTimeout(() => {
+            // 降低噪音：只记录带有明确交互意图的标签或者带样式的容器
+            if (['button', 'a', 'li'].includes(target.tagName ? target.tagName.toLowerCase() : '') || (target.getAttribute && target.getAttribute('role'))) {
+                try {
+                    const data = extractData(target);
+                    data.action = 'hover';
+                    if (window.playbotRecordAction) window.playbotRecordAction(data).catch(err => {});
+                } catch(err) {}
+            }
+        }, 800); // 必须悬停 800ms 且引发重绘
+    }, true);
+    
+    document.addEventListener('mouseout', () => clearTimeout(hoverTimer), true);
+    
+    // 4. SPA 虚假路由切换拦截 (History API 劫持)
+    const originalPushState = history.pushState;
+    history.pushState = function() {
+        originalPushState.apply(this, arguments);
+        if (window.playbotRecordAction) window.playbotRecordAction({action: 'virtual_navigate', url: window.location.href}).catch(err => {});
+    };
+    
+    const originalReplaceState = history.replaceState;
+    history.replaceState = function() {
+        originalReplaceState.apply(this, arguments);
+        if (window.playbotRecordAction) window.playbotRecordAction({action: 'virtual_navigate', url: window.location.href}).catch(err => {});
+    };
+    
+    window.addEventListener('popstate', () => {
+        if (window.playbotRecordAction) window.playbotRecordAction({action: 'virtual_navigate', url: window.location.href}).catch(err => {});
     });
     
-    return {
-        html: document.documentElement.outerHTML,
-        interactive_elements: elements
-    };
+    // 5. title变化监听
+    let oldTitle = document.title;
+    const titleObserver = new MutationObserver(() => {
+        if (document.title !== oldTitle) {
+            oldTitle = document.title;
+            if (window.playbotRecordAction) window.playbotRecordAction({action: 'title_changed', value: document.title, url: window.location.href}).catch(err => {});
+        }
+    });
+    // 6. 运行时组件反向扫描 (覆盖率分析)
+    function pingComponents() {
+        if (!window.playbotRecordAction) return;
+        try {
+            const comps = Array.from(document.querySelectorAll('[data-playbot-component]'))
+                .map(el => el.getAttribute('data-playbot-component'))
+                .filter(Boolean);
+            const uniqueComps = [...new Set(comps)];
+            if (uniqueComps.length > 0) {
+                window.playbotRecordAction({
+                    action: 'active_components',
+                    url: window.location.href,
+                    value: uniqueComps
+                }).catch(err => {});
+            }
+        } catch(err) {}
+    }
+    
+    window.addEventListener('load', pingComponents);
+    setInterval(pingComponents, 3000);
 }
 """
+
+class SelectorGenerator:
+    @staticmethod
+    def generate_statement(data: dict) -> str:
+        action = data.get('action')
+        attrs = data.get('attrs', {})
+        tag = data.get('tag', '*')
+        text = data.get('text', '')
+        path = data.get('path', '')
+        
+        # 对于不依赖 target 的全局操作
+        if action == 'virtual_navigate':
+            return f"# 页面内部路由跳转: {data.get('url')}"
+        if action == 'title_changed':
+            return f"# 页面Title更新: {data.get('value')}"
+        if action == 'active_components':
+            return f"# 刷新活跃组件快照"
+            
+        selector = ""
+        # 1. 优先 data-testid
+        if 'data-testid' in attrs:
+            selector = f"[data-testid='{attrs['data-testid']}']"
+        elif 'id' in attrs and 'el-id' not in attrs['id'] and not any(char.isdigit() for char in attrs['id']):
+            selector = f"#{attrs['id']}"
+        # 2. name 属性
+        elif 'name' in attrs:
+            selector = f"{tag}[name='{attrs['name']}']"
+        # 3. placeholder 用于 input
+        elif 'placeholder' in attrs:
+            selector = f"{tag}[placeholder='{attrs['placeholder']}']"
+        # 4. text 内容 (对 button / a)
+        elif tag in ['button', 'a'] and text and len(text) < 20 and '\n' not in text:
+            selector = f"{tag}:has-text('{text}')"
+        # 5. Type
+        elif tag == 'input' and 'type' in attrs and attrs['type'] not in ['text']:
+            selector = f"input[type='{attrs['type']}']"
+        # 6. Fallback path
+        else:
+            selector = path
+
+        selector = selector.replace("'", "\'")
+        
+        if action == 'click':
+            return f"page.locator('{selector}').click()"
+        elif action == 'input':
+            val = data.get('value', '').replace("'", "\'")
+            return f"page.locator('{selector}').fill('{val}')"
+        elif action == 'keydown':
+            key = data.get('value', '')
+            return f"page.locator('{selector}').press('{key}')"
+        elif action == 'hover':
+            return f"page.locator('{selector}').hover()"
+            
+        return f"# unknown action {action} on {selector}"
+
 
 class RecordingSession:
     """录制会话状态管理"""
@@ -69,460 +283,335 @@ class RecordingSession:
     def start(self, base_url: str = None):
         """开始/继续录制"""
         self.status = 'recording'
+        import time
         if not self.start_time:
             self.start_time = time.time()
         if base_url:
             self._browser_base_url = base_url
         logger.info(f"[录制会话] 开始录制: {self.project_id}")
-    
+        if not self.browser:
+            self.launch_browser()
+
+    def _setup_page_listeners(self, page):
+        """设置页面级别的隐性交互和拓扑追踪监听"""
+        page.on("dialog", lambda d: self._handle_dialog(d))
+        page.on("filechooser", lambda fc: self._handle_filechooser(fc))
+        page.on("response", lambda r: self._handle_response(r))
+
+    def _handle_dialog(self, dialog):
+        import time
+        if not hasattr(self, 'action_history'):
+            self.action_history = []
+        self.action_history.append({
+            "time": time.time(),
+            "url": dialog.page.url,
+            "statement": f"# 处理弹出框: {dialog.type} - {dialog.message}",
+            "raw_data": {"action": "handle_dialog", "value": dialog.message, "type": dialog.type}
+        })
+        try:
+            dialog.accept()
+        except: pass
+        self.save()
+
+    def _handle_filechooser(self, file_chooser):
+        import time
+        if not hasattr(self, 'action_history'):
+            self.action_history = []
+        self.action_history.append({
+            "time": time.time(),
+            "url": file_chooser.page.url,
+            "statement": f"# 激活文件选择器",
+            "raw_data": {"action": "upload_file"}
+        })
+        self.save()
+
+    def _handle_response(self, response):
+        if response.request.resource_type in ["xhr", "fetch"]:
+            import time
+            if not hasattr(self, 'action_history'):
+                self.action_history = []
+            self.action_history.append({
+                "time": time.time(),
+                "url": response.url, # API URL
+                "statement": f"# XHR 响应: [{response.request.method}] {response.status} - {response.url}",
+                "raw_data": {
+                    "action": "network_response",
+                    "url": response.url,
+                    "status": response.status,
+                    "method": response.request.method
+                }
+            })
+            self.save()
+
     def launch_browser(self):
-        """在独立线程中启动浏览器窗口"""
+        """启动录制浏览器线程"""
         if self.browser:
             logger.warning("[录制会话] 浏览器已存在")
             return
-        
+            
+        self._should_stop = False
+            
         def browser_thread():
             try:
-                print(f"[录制会话] 🚀 准备启动浏览器线程: {self.project_id}", flush=True)
-                logger.info("[录制会话] 🚀 启动浏览器...")
-                self._playwright = sync_playwright().start()
-                
-                # 启动可见的浏览器窗口（非headless）
-                self.browser = self._playwright.chromium.launch(
-                    headless=False,  # 显示浏览器窗口
-                    args=[
-                        '--no-sandbox',
-                        '--start-maximized',  # 启动时最大化
-                        '--window-size=1920,1080'  # 窗口尺寸
-                    ]
-                )
-                
-                print("[录制会话] ✅ 浏览器进程已启动", flush=True)
-                logger.info("[录制会话] ✅ 浏览器进程启动成功")
-                
-                # 创建浏览器上下文（不设置固定viewport，使用浏览器窗口大小）
-                self.context = self.browser.new_context(
-                    user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    viewport=None,  # 不使用固定viewport，让页面自适应窗口
-                    locale='zh-CN',
-                    timezone_id='Asia/Shanghai'
-                )
-                
-                # 创建页面
-                self.page = self.context.new_page()
-                print("[录制会话] ✅ 浏览器页面已创建", flush=True)
-                logger.info("[录制会话] ✅ 浏览器页面创建成功")
-                
-                # 监听导航事件
-                self.page.on('framenavigated', self._on_navigation)
-                
-                # 监听URL变化（支持SPA前端路由）
-                self.page.on('load', self._on_page_load)
-                
-                print("[录制会话] 📡 已注册页面导航监听器", flush=True)
-                logger.info("[录制会话] 已注册页面导航监听器（支持SPA）")
-                
-                # 确保 base_url 有协议头
-                if self._browser_base_url and not self._browser_base_url.startswith(('http://', 'https://')):
-                    self._browser_base_url = f"http://{self._browser_base_url}"
-                
-                # 打开起始页面
-                if self._browser_base_url:
-                    print(f"[录制会话] 🌐 正在访问起始页面: {self._browser_base_url}", flush=True)
-                    logger.info(f"[录制会话] 🌐 访问起始页面: {self._browser_base_url}")
-                    try:
-                        # 使用domcontentloaded更快启动
-                        self.page.goto(
-                            self._browser_base_url, 
-                            wait_until='load',  # 改为 load 确保页面更完整
-                            timeout=30000
-                        )
-                        print(f"[录制会话] ✅ 起始页面已加载", flush=True)
-                        logger.info(f"[录制会话] ✅ 起始页面加载完成")
-                    except Exception as e:
-                        print(f"[录制会话] ⚠️ 起始页面加载超时或失败: {e}", flush=True)
-                        logger.warning(f"[录制会话] ⚠️ 起始页面加载超时或失败: {e}")
-                
-                print("[录制会话] ✅ 浏览器就绪，进入主动监控循环...", flush=True)
-                
-                # 记录上次捕获的 DOM 长度，用于支持 Tab/Modal 变化
-                last_dom_fingerprint = {} # {url: length}
-                
-                while self.browser and self.browser.is_connected():
-                    try:
-                        # 遍历所有打开的页面（支持多标签页）
-                        pages = [p for p in self.context.pages if not p.is_closed()]
-                        for p in pages:
-                            current_url = p.url
-                            if not current_url.startswith('http'):
-                                continue
-                                
-                            route_pattern = self._normalize_url(current_url)
-                            
-                            # 触发捕获的两个条件：
-                            # 1. URL 发生了变化
-                            # 2. 页面内容发生了重大变化 (即使 URL 没变)
-                            try:
-                                # 只有当页面处于 idle 状态且可交互时才抓取，避免频繁 evaluate 导致的性能问题
-                                # 我们这里直接尝试抓取长度
-                                dom_len = p.evaluate('() => document.documentElement.outerHTML.length')
-                                
-                                is_new_url = current_url != last_url
-                                old_len = last_dom_fingerprint.get(current_url, 0)
-                                is_content_changed = abs(dom_len - old_len) > 500
-                                
-                                if is_new_url or is_content_changed:
-                                    # 更新当前的活跃页面对象供其他方法使用
-                                    self.page = p
-                                    
-                                    if is_new_url:
-                                        print(f"[录制会话] 🚀 路径切换: {current_url}", flush=True)
-                                        last_url = current_url
-                                    
-                                    # 抓取并保存
-                                    self._check_and_capture(current_url)
-                                    last_dom_fingerprint[current_url] = dom_len
-                            except:
-                                continue
-                                
-                    except Exception:
-                        pass
+                from playwright.sync_api import sync_playwright
+                with sync_playwright() as p:
+                    self._playwright = p
+                    self.browser = p.chromium.launch(
+                        headless=False,
+                        args=['--disable-blink-features=AutomationControlled']
+                    )
+                    self.context = self.browser.new_context(
+                        viewport={'width': 1280, 'height': 800}
+                    )
                     
-                    time.sleep(0.5) # 稍微放慢轮询，减轻 CPU 压力
-                
-                print("[录制会话] 🔴 浏览器连接已断开", flush=True)
-                logger.info("[录制会话] 浏览器窗口已关闭")
-                
+                    self.context.expose_binding("playbotRecordAction", self._handle_action)
+                    self.context.add_init_script(EXTRACT_DOM_JS)
+                    self.context.on("page", self._setup_page_listeners)
+                    
+                    self.page = self.context.new_page()
+                    self._setup_page_listeners(self.page)
+                    
+                    if self._browser_base_url and not self._browser_base_url.startswith(('http://', 'https://')):
+                        self._browser_base_url = f"http://{self._browser_base_url}"
+                    
+                    if self._browser_base_url:
+                        try:
+                            self.page.goto(self._browser_base_url, wait_until='load', timeout=30000)
+                        except Exception as e:
+                            print(f"[录制会话]  起始页面加载部分失败: {e}", flush=True)
+                    
+                    while self.browser and self.context and len(self.context.pages) > 0:
+                        if getattr(self, '_should_stop', False):
+                            print("[录制会话] 收到停止信号，正在主动退出浏览器线程...", flush=True)
+                            break
+                        try:
+                            if self.page and not self.page.is_closed():
+                                self.page.wait_for_timeout(1000)
+                            else:
+                                import time
+                                time.sleep(1)
+                        except Exception as e:
+                            # 捕获 TargetClosedError 或其他异常
+                            break
+                            
+                    print("[录制会话]  浏览器连接已断开", flush=True)
+                    if self.status in ['recording', 'paused']:
+                        self.status = 'interrupted'
             except Exception as e:
-                print(f"[录制会话] ❌ 浏览器线程发生崩溃: {e}", flush=True)
-                import traceback
-                traceback.print_exc()
-                logger.error(f"[录制会话] ❌ 浏览器启动失败: {e}", exc_info=True)
-        
+                print(f"[录制会话]  浏览器线程发生崩溃: {e}", flush=True)
+            finally:
+                # 必须重置引用，否则下一次 launch_browser 判断 self.browser 为真会直接 return
+                self.browser = None
+                self.context = None
+                self.page = None
+                self._playwright = None
+                self._browser_thread = None
+                
+        import threading
         self._browser_thread = threading.Thread(target=browser_thread, daemon=True)
         self._browser_thread.start()
-        
-        # 移除了主线程的 time.sleep(3)，防止 API 挂起
-        print(f"[录制会话] 线程已启动，API 准备返回", flush=True)
-    
-    def _check_and_capture(self, url: str):
-        """检查并捕获当前页面（带简单的去重逻辑，避免过度 evaluate）"""
-        # 规范化 URL
-        route_pattern = self._normalize_url(url)
-        
-        # 如果是新路由，或者是虽然记录过但还没抓取过 DOM 的路由
-        if route_pattern not in self.discovered_pages or self.discovered_pages[route_pattern]['dom'] is None:
-            try:
-                # 稍微等待稳定
-                import time
-                time.sleep(0.5)
-                
-                page_data = self.page.evaluate(EXTRACT_DOM_JS)
-                if page_data and page_data.get('html') and len(page_data['html']) > 100:
-                    self.add_page(url, {
-                        'html': page_data['html'],
-                        'interactive_elements': page_data.get('interactive_elements', []),
-                        'url': url
-                    })
-                    print(f"[录制会话] 🤖 自动捕获成功: {route_pattern}", flush=True)
-            except:
-                pass
 
-    def _on_navigation(self, frame):
-        """页面导航回调 - 在浏览器线程中直接捕获DOM"""
-        if self.status != 'recording':
-            return
-        
-        url = frame.url
-        
-        # 过滤非HTTP URL（如about:blank）
-        if not url.startswith('http'):
-            return
-        
-        logger.info(f"[录制会话] 📍 页面导航: {url}")
-        
-        # 直接在浏览器线程中捕获DOM（避免跨线程问题）
+    def save(self):
+        import os, json
+        os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
         try:
-            # 等待页面加载（使用较短的超时）
-            try:
-                self.page.wait_for_load_state('domcontentloaded', timeout=5000)
-            except:
-                pass  # 如果已经加载完成，忽略超时
-            
-            # 额外等待资源加载
-            import time
-            time.sleep(0.3)
-            
-            # 获取结构化DOM数据
-            page_data = self.page.evaluate(EXTRACT_DOM_JS)
-            
-            if page_data and page_data.get('html') and len(page_data['html']) > 100:
-                self.add_page(url, {
-                    'html': page_data['html'],
-                    'interactive_elements': page_data.get('interactive_elements', []),
-                    'url': url
-                })
-                logger.info(f"[录制会话] ✅ DOM捕获成功: {len(page_data['html'])} 字符, URL: {url}")
-            else:
-                logger.warning(f"[录制会话] ⚠️ DOM为空或太短: {url}")
+            with open(self.session_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'status': self.status,
+                    'action_history': getattr(self, 'action_history', []),
+                    'total_duration': getattr(self, 'total_duration', 0)
+                }, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.error(f"[录制会话] ❌ DOM捕获失败 {url}: {e}")
-    
-    def _on_page_load(self, page):
-        """页面加载完成回调（用于SPA）"""
-        if self.status != 'recording':
-            return
-        
-        try:
-            url = page.url
-            
-            # 过滤非HTTP URL
-            if not url.startswith('http'):
-                return
-            
-            logger.info(f"[录制会话] 📄 页面加载: {url}")
-            
-            # 等待并捕获结构化DOM
-            import time
-            time.sleep(0.5)
-            
-            page_data = self.page.evaluate(EXTRACT_DOM_JS)
-            
-            if page_data and page_data.get('html') and len(page_data['html']) > 100:
-                self.add_page(url, {
-                    'html': page_data['html'],
-                    'interactive_elements': page_data.get('interactive_elements', []),
-                    'url': url
-                })
-                logger.info(f"[录制会话] ✅ DOM捕获成功: {len(page_data['html'])} 字符, URL: {url}")
-        except Exception as e:
-            logger.error(f"[录制会话] ❌ 页面加载捕获失败: {e}")
-    
+            logger.error(f"[录制会话] 保存失败: {e}")
+
     def stop_browser(self):
-        """关闭浏览器"""
-        try:
-            if self.page:
-                self.page.close()
-                self.page = None
-            if self.browser:
-                self.browser.close()
-                self.browser = None
-            if self._playwright:
-                # Playwright必须在同一个线程中停止
-                self._playwright.stop()
-                self._playwright = None
-            logger.info("[录制会话] 浏览器已关闭")
-        except Exception as e:
-            # 浏览器可能已经在其他线程关闭，忽略错误
-            logger.debug(f"[录制会话] 关闭浏览器（已忽略）: {e}")
-            self.page = None
-            self.browser = None
-            self._playwright = None
-    
+        self._should_stop = True
+        # 不要在主线程中调用 self.browser.close()，这会导致 Playwright 跨线程同步死锁。
+        # 设置标识位后，内部循环结束时，with sync_playwright() 上下文管理器会自动析构并安全关闭。
+
     def pause(self):
-        """暂停录制"""
+        import time
         if self.status == 'recording':
             self.status = 'paused'
             if self.start_time:
                 self.total_duration += (time.time() - self.start_time)
                 self.start_time = None
-            self._save()  # 自动保存
-            logger.info(f"[录制会话] 暂停录制: {self.project_id}")
-            # 不关闭浏览器，保持页面状态
-    
+            self.save()
+
     def resume(self):
-        """继续录制"""
-        if self.status == 'paused':
+        import time
+        if self.status in ['paused', 'idle', 'interrupted']:
             self.status = 'recording'
             self.start_time = time.time()
-            logger.info(f"[录制会话] 继续录制: {self.project_id}")
-    
+            self.save()
+            if not self.browser:
+                self.launch_browser()
+
     def stop(self):
-        """停止录制"""
-        self.status = 'completed'
-        if self.start_time:
-            self.total_duration += (time.time() - self.start_time)
-            self.start_time = None
-        
-        # 保存最终状态
-        self._save()
-        
-        # 关闭浏览器
+        import time
         self.stop_browser()
-        
-        logger.info(f"[录制会话] 停止录制: {self.project_id}, 总时长: {self.total_duration:.1f}秒")
-    
-    def add_page(self, url: str, dom_data: dict):
-        """添加页面（自动去重与智能更新）"""
-        route_pattern = self._normalize_url(url)
-        new_dom_len = len(dom_data.get('html', ''))
-        
-        if route_pattern not in self.discovered_pages:
-            # 1. 发现新页面
-            self.discovered_pages[route_pattern] = {
-                'pattern': route_pattern,
-                'urls': [],
-                'dom': dom_data,
-                'components': [],
-                'first_visit': time.time(),
-                'last_dom_len': new_dom_len
-            }
-            print(f"[录制会话] ✨ 发现并保存新页面: {route_pattern}", flush=True)
-            self._save()
-            self._show_browser_notification(f"✨ 发现新页面: {route_pattern}")
-        else:
-            # 2. 路径已存在，检查是否需要更新 DOM (例如点开了 Tab 或弹窗)
-            old_page = self.discovered_pages[route_pattern]
-            old_dom_len = old_page.get('last_dom_len', 0)
+        if self.status == 'recording' and getattr(self, 'start_time', None):
+            self.total_duration += (time.time() - self.start_time)
+        self.status = 'completed'
+        self.start_time = None
+        self.save()
+
+    def _handle_action(self, source, action_data):
+        import time
+        try:
+            print(f"[录制会话] 收到原生请求: {action_data}", flush=True)
+            stmt = SelectorGenerator.generate_statement(action_data)
+            print(f"[录制会话] 动作捕获: {stmt}", flush=True)
             
-            # 如果新抓取的 DOM 长度显著增加（比如点开了内容），或者之前没抓到 DOM
-            if old_page['dom'] is None or new_dom_len > (old_dom_len + 500):
-                old_page['dom'] = dom_data
-                old_page['last_dom_len'] = new_dom_len
-                self._save()
-                print(f"[录制会话] 🔄 更新页面快照 (检测到新内容): {route_pattern}", flush=True)
-                self._show_browser_notification(f"✅ 页面快照已更新 (捕获到新交互内容)")
-            else:
-                logger.debug(f"[录制会话] 重复访问且内容无显著变化: {route_pattern}")
-        
-        # 记录访问历史
-        self.discovered_pages[route_pattern]['urls'].append(url)
+            if not hasattr(self, 'action_history'):
+                self.action_history = []
+                
+            self.action_history.append({
+                "time": time.time(),
+                "url": action_data.get('url') or source['page'].url,
+                "statement": stmt,
+                "raw_data": action_data,
+                "component": action_data.get('component')
+            })
+            
+            # 立即保存状态，防止丢失
+            self.save()
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"[录制会话] 处理动作发生错误: {e}", flush=True)
 
     def _show_browser_notification(self, message: str, color: str = "#52c41a"):
-        """在录制浏览器中显示一个高度兼容的悬浮提示"""
-        if not self.page:
+        """在录制浏览器所有已开页面中显示悬浮提示，保证用户能看到"""
+        if not self.context:
             return
+        
+        script = """
+            (args) => {
+                const msg = args[0];
+                const bgColor = args[1];
+                console.log('[Playbot] ' + msg);
+                const id = 'playbot-notification-box';
+                let el = document.getElementById(id);
+                if (el) el.remove();
+                
+                el = document.createElement('div');
+                el.id = id;
+                el.textContent = msg;
+                
+                // 极致稳健的样式设置
+                Object.assign(el.style, {
+                    position: 'fixed',
+                    top: '10px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    padding: '10px 24px',
+                    backgroundColor: bgColor,
+                    color: 'white',
+                    borderRadius: '6px',
+                    zIndex: '2147483647',
+                    fontWeight: 'bold',
+                    boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
+                    pointerEvents: 'none',
+                    transition: 'opacity 0.4s ease',
+                    fontFamily: 'system-ui, -apple-system, sans-serif',
+                    fontSize: '15px',
+                    lineHeight: '1.4',
+                    textAlign: 'center',
+                    minWidth: '250px'
+                });
+                
+                document.documentElement.appendChild(el);
+                
+                setTimeout(() => {
+                    if (el) {
+                        el.style.opacity = '0';
+                        setTimeout(() => { if (el && el.parentNode) el.remove(); }, 400);
+                    }
+                }, 2500);
+            }
+        """
+        
         try:
-            # 修正：Playwright evaluate 只接受一个参数，我们将参数打包成列表
-            self.page.evaluate("""
-                (args) => {
-                    const msg = args[0];
-                    const bgColor = args[1];
-                    console.log('[Playbot] ' + msg);
-                    const id = 'playbot-notification-box';
-                    let el = document.getElementById(id);
-                    if (el) el.remove();
-                    
-                    el = document.createElement('div');
-                    el.id = id;
-                    el.textContent = msg;
-                    
-                    // 极致稳健的样式设置
-                    Object.assign(el.style, {
-                        position: 'fixed',
-                        top: '10px',
-                        left: '50%',
-                        transform: 'translateX(-50%)',
-                        padding: '10px 24px',
-                        backgroundColor: bgColor,
-                        color: 'white',
-                        borderRadius: '6px',
-                        zIndex: '2147483647',
-                        fontWeight: 'bold',
-                        boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
-                        pointerEvents: 'none',
-                        transition: 'opacity 0.4s ease',
-                        fontFamily: 'system-ui, -apple-system, sans-serif',
-                        fontSize: '15px',
-                        lineHeight: '1.4',
-                        textAlign: 'center',
-                        minWidth: '250px'
-                    });
-                    
-                    document.documentElement.appendChild(el);
-                    
-                    setTimeout(() => {
-                        if (el) {
-                            el.style.opacity = '0';
-                            setTimeout(() => { if (el && el.parentNode) el.remove(); }, 400);
-                        }
-                    }, 2500);
-                }
-            """, [message, color]) # 参数打包
+            for p in self.context.pages:
+                if not p.is_closed():
+                    try:
+                        p.evaluate(script, [message, color])
+                    except:
+                        pass
         except Exception as e:
-            # 记录错误但不中断流程
             logger.warning(f"[录制会话] 注入通知失败: {e}")
     
     def _normalize_url(self, url: str) -> str:
-        """URL规范化（去参数、替换ID）"""
-        # 移除协议和域名，只保留路径
-        if '://' in url:
-            url = url.split('://', 1)[1]
-            url = url.split('/', 1)[1] if '/' in url else ''
-            url = '/' + url
+        """URL规范化（使用标准库，去参数、兼容 Hash 路由架构）"""
+        from urllib.parse import urlparse
         
-        # 移除查询参数
-        url = url.split('?')[0]
+        # 兼容不带前缀的裸路径
+        target_url = url if '://' in url else f"http://{url}"
+        parsed = urlparse(target_url)
         
-        # 移除哈希
-        url = url.split('#')[0]
-        
-        # 暂时关闭激进的 ID 转换，以观察真实路径匹配情况
-        # url = re.sub(r'/\d+', '/:id', url)
-        # uuid_pattern = r'/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-        # url = re.sub(uuid_pattern, '/:id', url, flags=re.IGNORECASE)
-
-        # 确保以/开头
-        if not url.startswith('/'):
-            url = '/' + url
-
+        # 基础路径
+        base_path = parsed.path
+        if not base_path.startswith('/'):
+            base_path = '/' + base_path
             
-        # 移除末尾斜杠（如果是根路径 / 则保留）
-        if len(url) > 1 and url.endswith('/'):
-            url = url[:-1]
+        # 解析 Hash 路由（适配 SPA）
+        hash_route = ''
+        if parsed.fragment and '/' in parsed.fragment:
+            # 去除 Hash 里的类似查询参数部分 (例如 #/settings?tab=1)
+            hash_str = parsed.fragment.split('?')[0]
+            hash_route = hash_str if hash_str.startswith('/') else '/' + hash_str
+            
+        # 组装
+        final_route = base_path
+        if final_route == '/':
+            final_route = ''
+        final_route += hash_route
         
-        return url
+        if not final_route:
+            final_route = '/'
+            
+        # 移除末尾斜杠
+        if len(final_route) > 1 and final_route.endswith('/'):
+            final_route = final_route[:-1]
+            
+        return final_route
     
     def load(self) -> bool:
         """加载会话"""
+        import os, json
         if os.path.exists(self.session_file):
             try:
                 with open(self.session_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
                     self.status = data.get('status', 'idle')
-                    self.discovered_pages = data.get('discovered_pages', {})
+                    self.action_history = data.get('action_history', [])
                     self.total_duration = data.get('total_duration', 0)
-                logger.info(f"[录制会话] 加载会话: {self.project_id}, 已发现 {len(self.discovered_pages)} 个页面")
                 return True
             except Exception as e:
-                logger.error(f"[录制会话] 加载会话失败: {e}")
+                import logging
+                logging.error(f"[录制会话] 加载失败: {e}")
         return False
     
-    def _save(self):
-        """保存会话到文件"""
-        try:
-            os.makedirs(os.path.dirname(self.session_file), exist_ok=True)
-            data = {
-                'project_id': self.project_id,
-                'status': self.status,
-                'discovered_pages': self.discovered_pages,
-                'total_duration': self.total_duration
-            }
-            with open(self.session_file, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.debug(f"[录制会话] 保存会话: {self.project_id}")
-        except Exception as e:
-            logger.error(f"[录制会话] 保存会话失败: {e}")
-    
     def clear(self):
-        """清除会话"""
-        # 先关闭浏览器
-        self.stop_browser()
-        
+        """清空会话"""
+        try:
+            self.stop_browser()
+        except: pass
+        import os
         if os.path.exists(self.session_file):
             os.remove(self.session_file)
         self.status = 'idle'
-        self.discovered_pages = {}
+        self.action_history = []
         self.start_time = None
         self.total_duration = 0
         self._browser_base_url = None
-        logger.info(f"[录制会话] 清除会话: {self.project_id}")
     
     def to_dict(self) -> dict:
-        """转换为字典"""
+        """转化为字典"""
         return {
             'project_id': self.project_id,
             'status': self.status,
-            'discovered_pages': self.discovered_pages,
-            'total_duration': self.total_duration
+            'action_count': len(getattr(self, 'action_history', [])),
+            'total_duration': getattr(self, 'total_duration', 0)
         }

@@ -24,8 +24,6 @@ const loading = ref(false)
 const searchText = ref('')
 const selectedIds = ref<string[]>([])
 const executing = ref(false)
-const generating = ref(false)
-const mcpGenerating = ref(false)
 const agentGenerating = ref(false)  // 智能体生成状态
 const selectedPageIds = ref<string[]>([])  // 从ProjectDetail传入的选中页面
 
@@ -76,50 +74,6 @@ async function loadCases() {
   }
 }
 
-async function handleGenerateCases() {
-  if (selectedPageIds.value.length === 0) {
-    message.warning('请先在左侧勾选一个或多个页面')
-    return
-  }
-  
-  generating.value = true
-  try {
-    let totalCases = 0
-    for (const pid of selectedPageIds.value) {
-      const newCases = await pageApi.generateCases(pid)
-      totalCases += newCases.length
-    }
-    message.success(`为 ${selectedPageIds.value.length} 个页面生成 ${totalCases} 条测试用例`)
-    await loadCases()
-  } catch (e: any) {
-    message.error(e.response?.data?.detail || '用例生成失败')
-  } finally {
-    generating.value = false
-  }
-}
-
-// MCP生成用例（支持批量）
-async function handleMCPGenerate() {
-  if (selectedPageIds.value.length === 0) {
-    message.warning('请先在左侧勾选一个或多个页面')
-    return
-  }
-  
-  mcpGenerating.value = true
-  try {
-    let totalCases = 0
-    for (const pid of selectedPageIds.value) {
-      const newCases = await pageApi.mcpGenerateCases(pid)
-      totalCases += newCases.length
-    }
-    message.success(`为 ${selectedPageIds.value.length} 个页面生成 ${totalCases} 条测试用例`)
-    await loadCases()
-  } catch (e: any) {
-    message.error(e.response?.data?.detail || 'MCP用例生成失败')
-  } finally {
-    mcpGenerating.value = false
-  }
-}
 
 // 智能体生成用例（LangGraph）
 async function handleAgentGenerate() {
@@ -165,7 +119,7 @@ async function handleDelete(id: string) {
   await loadCases()
 }
 
-async function handleRunSelected() {
+async function handleRunSelected(headless: boolean = true) {
   const ids = selectedIds.value.length > 0
     ? selectedIds.value
     : cases.value.filter(c => c.enabled).map(c => c.id)
@@ -175,7 +129,7 @@ async function handleRunSelected() {
   }
   executing.value = true
   try {
-    const execution = await executeApi.run(ids)
+    const execution = await executeApi.run(ids, headless)
     message.success('执行已启动')
     router.push(`/execution/${execution.id}`)
   } catch (e: any) {
@@ -284,28 +238,23 @@ onMounted(loadCases)
           <RobotOutlined /> 
           {{ selectedPageIds.length > 0 ? `🤖 智能体生成 (${selectedPageIds.length})` : '🤖 智能体生成' }}
         </a-button>
-        <a-button 
-          type="primary" 
-          @click="handleMCPGenerate" 
-          :loading="mcpGenerating"
-          :disabled="selectedPageIds.length === 0"
-        >
-          <RobotOutlined /> 
-          {{ selectedPageIds.length > 0 ? `MCP批量生成 (${selectedPageIds.length})` : 'MCP生成用例' }}
-        </a-button>
-        <a-button 
-          @click="handleGenerateCases" 
-          :loading="generating"
-          :disabled="selectedPageIds.length === 0"
-        >
-          <ThunderboltOutlined /> 
-          {{ selectedPageIds.length > 0 ? `批量生成 (${selectedPageIds.length})` : '传统生成' }}
-        </a-button>
         <a-button @click="showNewModal = true"><PlusOutlined /> 新增用例</a-button>
-        <a-button type="primary" @click="handleRunSelected" :loading="executing">
-          <PlayCircleOutlined />
-          {{ selectedIds.length > 0 ? `执行选中 (${selectedIds.length})` : '执行全部' }}
-        </a-button>
+        <a-dropdown placement="bottomRight">
+          <a-button type="primary" :loading="executing">
+            <PlayCircleOutlined />
+            {{ selectedIds.length > 0 ? `执行选中 (${selectedIds.length})` : '执行全部' }}
+          </a-button>
+          <template #overlay>
+            <a-menu>
+              <a-menu-item key="headed" @click="handleRunSelected(false)">
+                <PlayCircleOutlined style="margin-right: 8px;" />有头执行 (显示浏览器)
+              </a-menu-item>
+              <a-menu-item key="headless" @click="handleRunSelected(true)">
+                <ThunderboltOutlined style="margin-right: 8px;" />极速倒计时执行 (无痕)
+              </a-menu-item>
+            </a-menu>
+          </template>
+        </a-dropdown>
       </a-space>
     </div>
 

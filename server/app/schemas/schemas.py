@@ -47,13 +47,6 @@ class TestPageOut(BaseModel):
     
     model_config = {"from_attributes": True}
 
-
-class TestPageTreeOut(BaseModel):
-    """完整页面树"""
-    pages: list[TestPageOut]
-    total_cases: int
-
-
 # ---- TestCase ----
 class TestCaseCreate(BaseModel):
     project_id: str
@@ -134,10 +127,6 @@ class ExecutionDetailOut(BaseModel):
 
 
 # ---- Generate ----
-class GenerateRequest(BaseModel):
-    project_id: str
-
-
 class MCPGenerateRequest(BaseModel):
     """MCP 页面用例生成请求"""
     project_id: str

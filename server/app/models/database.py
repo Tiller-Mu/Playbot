@@ -37,6 +37,7 @@ class Project(Base):
     pages = relationship("TestPage", back_populates="project", cascade="all, delete-orphan")
     test_cases = relationship("TestCase", back_populates="project", cascade="all, delete-orphan")
     executions = relationship("Execution", back_populates="project", cascade="all, delete-orphan")
+    action_traces = relationship("ActionTrace", back_populates="project", cascade="all, delete-orphan")
 
 
 class TestPage(Base):
@@ -62,6 +63,7 @@ class TestPage(Base):
     project = relationship("Project", back_populates="pages")
     parent = relationship("TestPage", remote_side=[id], backref="children")
     test_cases = relationship("TestCase", back_populates="page", cascade="all, delete-orphan")
+    action_traces = relationship("ActionTrace", back_populates="page", cascade="all, delete-orphan")
 
 
 class TestCase(Base):
@@ -83,6 +85,22 @@ class TestCase(Base):
     project = relationship("Project", back_populates="test_cases")
     page = relationship("TestPage", back_populates="test_cases")
     execution_details = relationship("ExecutionDetail", back_populates="test_case", cascade="all, delete-orphan")
+
+
+class ActionTrace(Base):
+    """录制行为轨迹 (Semantic IR 原始容器)"""
+    __tablename__ = "action_traces"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id"), nullable=False)
+    page_id = Column(String(36), ForeignKey("test_pages.id"), nullable=False, comment="所属锚点页面ID")
+    title = Column(String(300), nullable=False)
+    description = Column(Text, comment="自然语言描述")
+    trace_data = Column(Text, comment="Semantic IR / IntentPlan 的 JSON 数据")
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    project = relationship("Project", back_populates="action_traces")
+    page = relationship("TestPage", back_populates="action_traces")
 
 
 class Execution(Base):

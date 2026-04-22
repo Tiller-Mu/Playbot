@@ -226,8 +226,9 @@ def analyze_page_data(source_code: str, dom_data: Any, file_path: str = '') -> D
     Returns:
         结构化分析结果
     """
+    is_vue = file_path.endswith('.vue') or '<template>' in source_code or '<script' in source_code
     result = {
-        'file_type': 'vue' if file_path.endswith('.vue') else 'unknown',
+        'file_type': 'vue' if is_vue else 'unknown',
         'code_structure': {},
         'dom_structure': {}
     }

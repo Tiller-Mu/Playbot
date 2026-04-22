@@ -69,8 +69,8 @@ async def _find_page_files(repo: Path) -> list[dict[str, str]]:
                         "component": component_name,
                     })
         
-        # 3. Vue Router: src/views/**/*.vue
-        for pattern in ["src/views/**/*.vue", "views/**/*.vue"]:
+        # 3. Vue Router: src/views/**/*.vue, src/pages/**/*.vue 等
+        for pattern in ["src/views/**/*.vue", "views/**/*.vue", "src/pages/**/*.vue", "pages/**/*.vue"]:
             for page_file in repo.glob(pattern):
                 if page_file.is_file():
                     rel_path = str(page_file.relative_to(repo))
@@ -174,10 +174,10 @@ def _vue_route_to_path(page_file: Path, repo: Path) -> str:
     rel_path = page_file.relative_to(repo)
     parts = rel_path.parts
     
-    # 找到 'views' 的位置
+    # 找到 'views' 或 'pages' 的位置
     views_index = -1
     for i, part in enumerate(parts):
-        if part == 'views':
+        if part in ('views', 'pages'):
             views_index = i
             break
     
@@ -308,18 +308,13 @@ def _extract_imported_components(page_file: Path, repo: Path) -> list[str]:
     3. 保留 components、views 等目录的引用
     4. 提取组件名称（从导入路径或默认导出）
     """
+    import re
     try:
         content = page_file.read_text(encoding='utf-8', errors='ignore')
         components = set()
         
-        # 匹配 import 语句
-        # import Xxx from 'yyy'
-        # import { Xxx } from 'yyy'
-        # import Xxx, { Yyy } from 'yyy'
-        import_patterns = [
-            r"import\s+(\w+)\s+from\s+[\x27\x22]([^\x27\x22]+)[\x27\x22]",  # import Xxx from quote
-            r"import\s+\{([^}]+)\}\s+from\s+[\x27\x22]([^\x27\x22]+)[\x27\x22]",  # import { Xxx } from quote
-        ]
+        # 匹配 import 语句的通用正则
+        pattern = r"import\s+(.*?)\s+from\s+[\x27\x22]([^\x27\x22]+)[\x27\x22]"
         
         # 非组件目录（需要排除）
         exclude_dirs = {'utils', 'api', 'services', 'store', 'router', 'config', 'assets', 'styles', 'types'}
@@ -331,28 +326,24 @@ def _extract_imported_components(page_file: Path, repo: Path) -> list[str]:
             if not line.startswith('import'):
                 continue
             
-            # 尝试匹配 import 语句
-            for pattern in import_patterns:
-                matches = re.finditer(pattern, line)
-                for match in matches:
-                    if pattern.startswith(r"import\s+(\w+)"):
-                        # import Xxx from 'yyy'
-                        component_name = match.group(1)
-                        import_path = match.group(2)
-                    else:
-                        # import { Xxx, Yyy } from 'yyy'
-                        names = match.group(1).split(',')
-                        import_path = match.group(2)
-                        # 添加所有命名的导入
-                        for name in names:
-                            name = name.strip().split(' as ')[-1].strip()
-                            if name and name.isidentifier():
-                                components.add(name)
-                        continue
-                    
-                    # 判断是否是组件引用
-                    if _is_component_import(import_path, component_name, exclude_dirs, component_dirs):
-                        components.add(component_name)
+            matches = re.finditer(pattern, line)
+            for match in matches:
+                imports_str = match.group(1).strip()
+                import_path = match.group(2).strip()
+                
+                # 解析诸如 A, { B, C as D } 的语法
+                names_to_add = []
+                clean_str = imports_str.replace('{', '').replace('}', '')
+                for name in clean_str.split(','):
+                    name = name.strip().split(' as ')[-1].strip()
+                    # 我们过滤出符合大写开头的常见组件命名约定
+                    if name and name.isidentifier() and name[0].isupper():
+                        names_to_add.append(name)
+                
+                if names_to_add:
+                    # 我们只取第一个名字做路径猜测校验
+                    if _is_component_import(import_path, names_to_add[0], exclude_dirs, component_dirs):
+                        components.update(names_to_add)
         
         return sorted(list(components))
         

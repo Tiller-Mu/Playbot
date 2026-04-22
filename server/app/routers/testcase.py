@@ -99,8 +99,10 @@ async def nl_edit_testcase(
                 "1. 使用 pytest + playwright (sync_api)\n"
                 "2. 测试函数参数为 page: Page\n"
                 "3. 使用 expect() 做断言\n"
-                "4. 代码中加中文注释说明每个步骤\n"
-                "5. 只返回 JSON 格式: {\"description\": \"...\", \"script_content\": \"...\"}"
+                "4. 遇到前端UI库（如 Ant Design 的 Select 组件）中被 span 层拦截导致 Timeout 时，务必使用 locator.click(force=True)\n"
+                "5. 避开严格模式(Strict Mode)与精准定位：严禁无脑使用 .first！应优先使用 exact=True (如 get_by_text('xx', exact=True))、get_by_role('option')、filter(visible=True) 或限定父级范围，确保命中需要真实交互的元素。\n"
+                "6. 代码中加中文注释说明每个步骤\n"
+                "7. 只返回 JSON 格式: {\"description\": \"...\", \"script_content\": \"...\"}"
             ),
         },
         {

@@ -1,11 +1,11 @@
 <template>
   <a-modal
-    v-model:open="visible"
+    :open="props.open"
     title="📹 页面探索录制"
     :width="700"
     :footer="null"
     :maskClosable="false"
-    :closable="false"
+    :closable="true"
     @cancel="handleCancel"
   >
     <!-- 状态显示 -->
@@ -52,8 +52,8 @@
     
     <!-- 实时统计 -->
     <a-descriptions bordered size="small" :column="2">
-      <a-descriptions-item label="已发现页面">
-        <a-tag color="blue">{{ discoveredCount }}</a-tag>
+      <a-descriptions-item label="已记录动作">
+        <a-tag color="blue">{{ actionCount }}</a-tag>
       </a-descriptions-item>
       <a-descriptions-item label="录制状态">
         <a-badge :status="statusBadge" :text="statusText" />
@@ -69,21 +69,18 @@
     </a-descriptions>
     
     <!-- 页面列表 -->
-    <div v-if="discoveredPages.length > 0" style="margin-top: 16px">
-      <h4 style="margin-bottom: 8px">已发现的页面：</h4>
+    <div v-if="recordedActions.length > 0" style="margin-top: 16px">
+      <h4 style="margin-bottom: 8px">生成的测试动作：</h4>
       <a-list
-        :data-source="discoveredPages"
+        :data-source="recordedActions"
         :pagination="{ pageSize: 5 }"
         size="small"
       >
         <template #renderItem="{ item }">
           <a-list-item>
-            <a-list-item-meta :title="item.pattern">
+            <a-list-item-meta :title="item.statement || '未知动作'">
               <template #description>
-                访问 {{ item.urls?.length || 1 }} 次
-                <span v-if="item.first_visit">
-                  · 首次访问 {{ formatTime(item.first_visit) }}
-                </span>
+                <code>{{ item.raw_data?.action }}</code> on {{ item.raw_data?.tag }}
               </template>
             </a-list-item-meta>
           </a-list-item>
@@ -142,7 +139,7 @@ import {
   CheckCircleOutlined
 } from '@ant-design/icons-vue'
 import { recordingApi } from '../services/api'
-import { message } from 'ant-design-vue'
+import { message, Modal } from 'ant-design-vue'
 
 const props = defineProps<{
   open: boolean
@@ -161,7 +158,7 @@ const visible = computed({
 
 const status = ref<'idle' | 'recording' | 'paused' | 'completed'>('idle')
 const startLoading = ref(false)
-const discoveredPages = ref<any[]>([])
+const recordedActions = ref<any[]>([])
 const duration = ref(0)
 const lastCapturedUrl = ref<string>('')  // 最后捕获的URL
 let localTimer: number | null = null  // 本地计时器
@@ -218,7 +215,7 @@ const durationText = computed(() => {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`
 })
 
-const discoveredCount = computed(() => discoveredPages.value.length)
+const actionCount = computed(() => recordedActions.value.length)
 
 // 轮询获取状态
 let pollingTimer: number | null = null
@@ -237,7 +234,7 @@ watch(() => props.open, async (newVal) => {
     
     // 如果是已完成或初始状态，重置本地显示，准备开始新录制
     if (status.value === 'completed' || status.value === 'idle') {
-      discoveredPages.value = []
+      recordedActions.value = []
       duration.value = 0
       lastCapturedUrl.value = ''
     }
@@ -285,6 +282,13 @@ async function loadStatus() {
     const isActive = status.value === 'recording' || status.value === 'paused'
     const isJustFinished = oldStatus === 'recording' && status.value === 'completed'
     
+    // 如果碰到了意外退出的打断状态，自动触发打扫数据的收尾工作
+    if (res.status === 'interrupted') {
+      message.warning('检测到录制浏览器可能被强行关闭，系统正为您自动打包录制数据...')
+      await handleStop()
+      return
+    }
+    
     if (isActive || isJustFinished) {
       // 优化时长同步：只有当后端时间显著大于前端（误差>5秒），或者状态刚切换时才覆盖
       const backendDuration = Math.floor(res.duration || 0)
@@ -292,20 +296,16 @@ async function loadStatus() {
         duration.value = backendDuration
       }
       
-      // 转换页面列表
-      if (res.discovered_pages && res.discovered_pages.length > 0) {
-        discoveredPages.value = res.discovered_pages.map((pattern: string) => ({
-          pattern,
-          urls: [pattern],
-          first_visit: null
-        }))
+      // 转换动作历史列表
+      if (res.actions && res.actions.length > 0) {
+        recordedActions.value = res.actions;
         // 显示最后捕获的页面
-        lastCapturedUrl.value = res.discovered_pages[res.discovered_pages.length - 1]
+        lastCapturedUrl.value = res.actions[res.actions.length - 1]?.url || '';
       }
     } else if (status.value === 'completed' || status.value === 'idle') {
       // 如果是刚打开弹窗看到的完成状态，说明是旧数据，清空显示
       if (oldStatus === 'idle' || !isActive) {
-        discoveredPages.value = []
+        recordedActions.value = []
         duration.value = 0
         lastCapturedUrl.value = ''
       }
@@ -322,6 +322,7 @@ async function handleStartOrResume() {
     return
   }
   
+  startLoading.value = true
   try {
     const res = await recordingApi.start(props.projectId)
     status.value = res.status as any
@@ -333,6 +334,8 @@ async function handleStartOrResume() {
     } else {
       message.error(e.response?.data?.detail || '启动录制失败')
     }
+  } finally {
+    startLoading.value = false
   }
 }
 
@@ -372,11 +375,27 @@ async function handleStop() {
 
 // 取消
 function handleCancel() {
-  // 如果是已完成状态，也触发一次完成事件以刷新列表
-  if (status.value === 'completed') {
-    emit('recording-complete', null)
+  if (status.value === 'recording' || status.value === 'paused') {
+    Modal.confirm({
+      title: '⚠️ 录制仍在进行中',
+      content: '关闭本控制台将自动终止录制进程。是否立即结束并生成报告？',
+      okText: '停止并生成报告',
+      cancelText: '继续录制 (不关闭)',
+      maskClosable: true,
+      onOk: async () => {
+        await handleStop()
+      },
+      onCancel: () => {
+        // 用户取消，什么都不做，弹窗保持打开状态
+      }
+    })
+  } else {
+    // 如果是已完成状态，也触发一次完成事件以刷新列表
+    if (status.value === 'completed') {
+      emit('recording-complete', null)
+    }
+    emit('update:open', false)
   }
-  visible.value = false
 }
 
 // 格式化时间

@@ -110,12 +110,19 @@ class PlaywrightMCPService:
                         document.querySelectorAll(selector).forEach(el => {
                             const rect = el.getBoundingClientRect();
                             if (rect.width > 0 && rect.height > 0) {
+                                const attrs = {};
+                                if (el.attributes) {
+                                    for (let n = 0; n < el.attributes.length; n++) {
+                                        attrs[el.attributes[n].name] = el.attributes[n].value;
+                                    }
+                                }
                                 elements.push({
                                     tag: el.tagName.toLowerCase(),
                                     type: el.type || el.getAttribute('role'),
                                     text: el.innerText?.substring(0, 100) || '',
                                     placeholder: el.placeholder || '',
                                     value: el.value || '',
+                                    attributes: attrs,
                                     visible: true,
                                     position: {
                                         x: Math.round(rect.x),

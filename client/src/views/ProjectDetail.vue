@@ -54,19 +54,36 @@ const associationPanel = ref<{
   type: 'page' | 'component'
   items: string[]
   description?: string  // 页面描述
+  isCaptured?: boolean
+  pageId?: string
 }>({
   visible: false,
   title: '',
   type: 'page',
   items: [],
-  description: ''
+  description: '',
+  isCaptured: false,
+  pageId: ''
 })
+
+// 快照弹窗状态
+const snapshotModal = ref({
+  visible: false,
+  pageId: ''
+})
+
+function showSnapshotModal(pageId?: string) {
+  if (!pageId) return
+  snapshotModal.value = {
+    visible: true,
+    pageId
+  }
+}
 
 // 页面树相关
 const pageTree = ref<TestPage[]>([])
 const selectedPageId = ref<string | null>(null)
 const treeExpandedKeys = ref<string[]>([])
-const analyzingPages = ref<Record<string, boolean>>({})  // 记录每个页面的分析状态
 
 // MCP日志相关
 const showMCPLog = ref(false)  // 是否显示MCP日志面板
@@ -296,20 +313,20 @@ function onTreeCheck(checkedKeys: any, _info: any) {
 }
 
 // 显示关联信息面板
-function showAssociationPanel(title: string, type: 'page' | 'component', items: string[], description?: string) {
+function showAssociationPanel(title: string, type: 'page' | 'component', items: any[], description?: string, isCaptured?: boolean, pageId?: string) {
   associationPanel.value = {
     visible: true,
     title,
     type,
     items,
-    description: description || ''
+    description: description || '',
+    isCaptured: isCaptured || false,
+    pageId: pageId || ''
   }
 }
 
 // 页面节点选择
-function onPageSelect(selectedKeys: string[], info: any) {
-
-  
+async function onPageSelect(selectedKeys: string[], info: any) {
   // 递归查找页面
   function findPageInTree(pages: any[], pageId: string): any {
     for (const page of pages) {
@@ -332,13 +349,20 @@ function onPageSelect(selectedKeys: string[], info: any) {
     
     if (page) {
       selectedNodeId.value = pageId
-      const components = pageComponents.value[pageId] || []
+      let traces = []
+      try {
+        traces = await pageApi.getTraces(pageId)
+      } catch (e) {
+        console.error('Failed to load traces', e)
+      }
       
       showAssociationPanel(
         `页面: ${page.name || page.path}`,
         'page',
-        components,
-        page.description  // 传入description
+        traces,
+        page.description,  // 传入description
+        (page as any).is_captured,
+        page.id
       )
       
       // 同时触发路由跳转，传递选中的页面IDs
@@ -354,12 +378,19 @@ function onPageSelect(selectedKeys: string[], info: any) {
     const page = findPageInTree(pageTree.value, pageId)
     
     if (page) {
-      const components = pageComponents.value[pageId] || []
+      let traces = []
+      try {
+        traces = await pageApi.getTraces(pageId)
+      } catch (e) {
+        console.error('Failed to load traces', e)
+      }
       showAssociationPanel(
         `页面: ${page.name || page.path}`,
         'page',
-        components,
-        page.description
+        traces,
+        page.description,
+        (page as any).is_captured,
+        page.id
       )
     }
   }
@@ -396,27 +427,6 @@ async function handleRefreshTree() {
     message.error(e.response?.data?.detail || '刷新页面树失败')
   } finally {
     treeLoading.value = false
-  }
-}
-
-// 单页 LLM 分析
-async function handleAnalyzePage(pageId: string) {
-  if (analyzingPages.value[pageId]) return
-  
-  analyzingPages.value[pageId] = true
-  showMCPLog.value = true  // 自动展开日志面板
-  
-  try {
-    await generateApi.analyzePage(pageId)
-    
-    message.success('页面分析完成')
-    
-    // 刷新页面树以显示新的描述
-    await loadPageTree()
-  } catch (e: any) {
-    message.error(e.response?.data?.detail || '页面分析失败')
-  } finally {
-    analyzingPages.value[pageId] = false
   }
 }
 
@@ -782,25 +792,14 @@ onUnmounted(() => {
             <template #title="{ dataRef }">
               <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
                 <span>{{ dataRef.title }}</span>
-                <div style="display: flex; gap: 4px;">
-                  <!-- 显示组件数量 -->
+                  <!-- 显示录制轨迹数量 -->
                   <a-badge 
-                    :count="pageComponents[dataRef.key]?.length || 0" 
+                    v-if="dataRef.isLeaf"
+                    :count="0" 
                     :number-style="{ backgroundColor: '#52c41a' }"
                     size="small"
-                    title="关联组件数量"
+                    title="录制轨迹数量"
                   />
-                  <a-button 
-                    v-if="dataRef.isLeaf"
-                    size="small" 
-                    type="link" 
-                    :loading="analyzingPages[dataRef.key]"
-                    @click.stop="handleAnalyzePage(dataRef.key)"
-                    style="padding: 0 4px;"
-                  >
-                    🔍
-                  </a-button>
-                </div>
               </div>
             </template>
           </a-tree>
@@ -843,36 +842,23 @@ onUnmounted(() => {
         width="600px"
         :bodyStyle="{ maxHeight: '70vh', overflowY: 'auto' }"
       >
-        <!-- 页面描述 -->
-        <div v-if="associationPanel.type === 'page'" 
-             style="margin-bottom: 16px; padding: 12px; background: #f5f5f5; border-radius: 4px;">
-          <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">📝 页面描述</div>
-          <div v-if="associationPanel.description" style="color: #333; line-height: 1.6; font-size: 14px;">
-            {{ associationPanel.description }}
+        <!-- 页面录制成果展示 -->
+        <div v-if="associationPanel.type === 'page'">
+          <div v-if="associationPanel.items && associationPanel.items.length > 0">
+            <div v-for="(trace, index) in associationPanel.items" :key="trace.id" style="margin-bottom: 16px; border: 1px solid #ebedf0; border-radius: 4px; padding: 12px;">
+              <div style="font-weight: bold; margin-bottom: 8px; color: #1890ff;">{{ trace.title }}</div>
+              <div style="color: #666; font-size: 12px; margin-bottom: 12px;">{{ trace.description }}</div>
+              <div style="background: #1e1e1e; padding: 12px; border-radius: 4px; overflow-x: auto; max-height: 400px; overflow-y: auto;">
+                <pre style="margin: 0; color: #d4d4d4; font-family: 'SF Mono', Consolas, monospace; font-size: 12px;">{{ trace.trace_data ? JSON.stringify(JSON.parse(trace.trace_data), null, 2) : '暂无数据' }}</pre>
+              </div>
+            </div>
           </div>
-          <div v-else style="color: #999; font-size: 13px; font-style: italic;">
-            暂无描述，点击右侧 🔍 按钮进行页面分析
-          </div>
-        </div>
-        
-        <!-- 组件列表 -->
-        <div v-if="associationPanel.type === 'page'" style="margin-bottom: 16px;">
-          <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">🧩 使用的组件</div>
-          <div style="display: flex; flex-wrap: wrap; gap: 8px;">
-            <a-tag 
-              v-for="comp in associationPanel.items" 
-              :key="comp"
-              color="blue"
-            >
-              {{ comp }}
-            </a-tag>
-            <span v-if="associationPanel.items.length === 0" style="color: #999; font-size: 13px; font-style: italic;">
-              暂无组件关联，请先进行页面分析
-            </span>
+          <div v-else style="padding: 20px; text-align: center; color: #999;">
+            此页面暂无关联的录制轨迹数据
           </div>
         </div>
         
-        <!-- 页面列表 -->
+        <!-- 组件对应的页面列表 -->
         <div v-if="associationPanel.type === 'component'">
           <div style="font-weight: 500; margin-bottom: 8px; color: #666; font-size: 12px;">📄 使用的页面</div>
           <div style="display: flex; flex-wrap: wrap; gap: 8px;">
@@ -979,6 +965,23 @@ onUnmounted(() => {
       :project-id="project?.id"
       @recording-complete="handleRecordingComplete"
     />
+    
+    <!-- DOM 快照预览弹窗 -->
+    <a-modal
+      v-model:open="snapshotModal.visible"
+      title="🖼️ 页面 DOM 快照"
+      width="90%"
+      :footer="null"
+      :bodyStyle="{ padding: 0, height: '80vh' }"
+      destroyOnClose
+    >
+      <iframe 
+        v-if="snapshotModal.visible"
+        :src="`/api/recording/${projectId}/pages/${snapshotModal.pageId}/snapshot`"
+        style="width: 100%; height: 100%; border: none"
+        sandbox=""
+      />
+    </a-modal>
     
     <!-- 覆盖率报告弹窗 -->
     <a-modal

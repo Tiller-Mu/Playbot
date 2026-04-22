@@ -398,6 +398,23 @@ async def get_page_cases(page_id: str, db: AsyncSession = Depends(get_db)):
     return res.scalars().all()
 
 
+# ========== 录制轨迹获取 ==========
+
+@router.get("/{page_id}/traces")
+async def get_page_traces(page_id: str, db: AsyncSession = Depends(get_db)):
+    """获取挂载在指定页面节点下的所有录制行为轨迹 (ActionTrace)"""
+    from app.models.database import ActionTrace
+    page = await db.get(TestPage, page_id)
+    if not page: return []
+    
+    res = await db.execute(
+        select(ActionTrace)
+        .where(ActionTrace.page_id == page_id)
+        .order_by(ActionTrace.created_at.desc())
+    )
+    return res.scalars().all()
+
+
 # ========== 智能体生成用例（LangGraph） ==========
 
 @router.post("/{page_id}/generate-agent")
@@ -510,12 +527,41 @@ async def generate_cases_with_agent(
             return await llm_chat_stream(messages, on_token=on_token_callback)
 
         from app.services.llm_service import get_langchain_chat_model
+        from pydantic import ValidationError
+        import re
+        
         async def structured_wrapper(messages, target_schema):
             llm = await get_langchain_chat_model()
             structured_llm = llm.with_structured_output(target_schema)
             # 给前台微反馈，不至于看着卡了
             await log_callback("stream", "正在通过 Schema 进行任务规划编排...\n")
-            return await structured_llm.ainvoke(messages)
+            try:
+                return await structured_llm.ainvoke(messages)
+            except Exception as e:
+                await log_callback("warning", "⚠️ 拦截到非标准 JSON 附加物(或无原生Tool支持)，启动强制降级清洗引擎...\n")
+                
+                # 尝试通过原始返回或重新直接调用获取 raw string
+                # 提示模型纯出 JSON
+                import json
+                schema_json = json.dumps(target_schema.model_json_schema(), ensure_ascii=False)
+                fallback_msgs = list(messages)
+                fallback_txt = f"\n\n【系统修正惩罚】：上抛代码格式错误(禁止使用markdown块包裹！)。请你重拾此任务并直接输出原生合法的 JSON 字符串，请遵守下方 Schema 限定:\n{schema_json}"
+                if fallback_msgs and fallback_msgs[-1]["role"] == "user":
+                    fallback_msgs[-1] = {"role": "user", "content": str(fallback_msgs[-1]["content"]) + fallback_txt}
+                else:
+                    fallback_msgs.append({"role": "user", "content": fallback_txt})
+                
+                # 使用带心跳且实时的流式调用，绝对防御 100s 连接超时断开的问题
+                raw_content = await streaming_llm_caller(fallback_msgs)
+                content = raw_content.strip()
+                if "```" in content:
+                    match = re.search(r'```(?:json)?\s*(.*?)\s*```', content, re.DOTALL)
+                    if match:
+                        content = match.group(1).strip()
+                try:
+                    return target_schema.model_validate_json(content)
+                except Exception as e2:
+                    raise Exception(f"清洗后仍无法解析: {e2}")
 
         config = AgentConfig(
             llm_caller=streaming_llm_caller,

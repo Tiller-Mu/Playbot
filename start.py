@@ -9,6 +9,9 @@ import time
 import os
 from pathlib import Path
 
+if sys.stdout.encoding != 'utf-8':
+    sys.stdout.reconfigure(encoding='utf-8')
+
 
 def kill_process_by_port(port):
     """根据端口号终止进程"""
@@ -54,9 +57,9 @@ def start_backend():
     # 使用python命令（py命令可能失效）
     cmd = f'python -m uvicorn app.main:app --reload --port {port}'
     
-    # 使用start命令确保弹出新窗口
+    # 使用start命令确保弹出新窗口，改用 powershell 获得极大默认缓冲区（3000行+）
     subprocess.Popen(
-        f'start "Playbot Backend" cmd /k {cmd}',
+        f'start "Playbot Backend" powershell -NoExit -Command "{cmd}"',
         cwd=server_dir,
         shell=True
     )
@@ -71,7 +74,20 @@ def start_frontend():
     print("=" * 60)
     
     client_dir = Path(__file__).parent / "client"
-    port = 5173
+    port = 5174
+    
+    # [模拟自动化构建注入] 将测试环境用的 Vite Plugin 注入到 target 项目中
+    vite_config_path = client_dir / "vite.config.ts"
+    try:
+        content = vite_config_path.read_text(encoding='utf-8')
+        if 'playbotComponentInjector' not in content:
+            print(f"   ✓ [CI/CD阶段] 正在自动化挂载 playbot 组件侦测插件...")
+            import_stmt = "import playbotComponentInjector from '../plugins/vite-plugin-playbot';\n"
+            new_content = import_stmt + content
+            new_content = new_content.replace('plugins: [vue()]', 'plugins: [vue(), playbotComponentInjector()]')
+            vite_config_path.write_text(new_content, encoding='utf-8')
+    except Exception as e:
+        print(f"   ⚠ 注入测试构建片段失败: {e}")
     
     # 检查并清理端口
     print(f"\n📡 检查端口 {port}...")
@@ -85,12 +101,11 @@ def start_frontend():
         kill_process_by_port(port)
         time.sleep(1)
     
-    # 启动前端（新窗口）
+    # 启动前端（新窗口，使用 PowerShell 获取大缓冲区）
     print(f"   ✓ 启动前端服务 (端口: {port})")
     
-    # 使用start命令确保弹出新窗口
     subprocess.Popen(
-        'start "Playbot Frontend" cmd /k npm run dev',
+        'start "Playbot Frontend" powershell -NoExit -Command "npm run dev"',
         cwd=client_dir,
         shell=True
     )
@@ -108,7 +123,7 @@ def main():
     print("      - 地址: http://localhost:8004")
     print("      - 特性: 自动热更新")
     print("   2. 前端服务 (Vue3 + Vite)")
-    print("      - 地址: http://localhost:5173")
+    print("      - 地址: http://localhost:5174")
     print("      - 特性: 自动热更新")
     print("\n⏳ 正在启动服务...\n")
     
@@ -129,7 +144,7 @@ def main():
         print("✅ 所有服务已启动完成！")
         print("=" * 60)
         print("\n🌐 访问地址:")
-        print("   • 前端: http://localhost:5173")
+        print("   • 前端: http://localhost:5174")
         print("   • 后端API: http://localhost:8004")
         print("   • API文档: http://localhost:8004/docs")
         print("\n💡 提示:")

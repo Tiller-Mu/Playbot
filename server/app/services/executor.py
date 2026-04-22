@@ -74,7 +74,7 @@ async def _do_run(
         f'import pytest\n\n'
         f'@pytest.fixture(scope="session")\n'
         f'def browser_context_args(browser_context_args):\n'
-        f'    return {{**browser_context_args, "base_url": "{project_base_url}"}}\n',
+        f'    return {{**browser_context_args, "base_url": "{project_base_url or ""}"}}\n',
         encoding="utf-8",
     )
 
@@ -113,17 +113,18 @@ async def _do_run(
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     # Ensure user-installed packages are discoverable
-    env["PATH"] = os.path.expanduser("~/.local/bin") + ":" + env.get("PATH", "")
+    env["PATH"] = os.path.expanduser("~/.local/bin") + os.pathsep + env.get("PATH", "")
 
     log.info("Running: %s", " ".join(cmd_parts))
 
-    process = await asyncio.create_subprocess_exec(
-        *cmd_parts,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+    import subprocess
+    process = await asyncio.to_thread(
+        subprocess.run,
+        cmd_parts,
+        capture_output=True,
         env=env,
     )
-    stdout, stderr = await process.communicate()
+    stdout, stderr = process.stdout, process.stderr
 
     log.info("pytest exit code: %s", process.returncode)
     if stderr:
