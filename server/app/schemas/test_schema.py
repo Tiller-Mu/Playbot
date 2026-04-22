@@ -1,23 +1,22 @@
 from pydantic import BaseModel, Field
 from typing import List, Literal, Optional
 
-# Supported Actions Expanded
 ActionType = Literal[
-    "click", "fill", "hover", "press", "check", "uncheck", "clear",
-    "expect_visible", "expect_hidden", "expect_text", "expect_enabled", "expect_disabled"
+    "navigate", "click", "fill", "hover", "press", "check", "uncheck", "clear",
+    "expect_visible", "expect_hidden", "expect_text", "expect_enabled", "expect_disabled", "custom_script"
 ]
 
-class TestActionSchema(BaseModel):
-    action: ActionType = Field(..., description="测试动作类型")
-    target_id: str = Field(..., description="操作目标元素的唯一 ID，必须严格来源于系统给定的【元素字典（白名单）】")
-    value: Optional[str] = Field(None, description="当 action 需要附带值时使用（例如 fill 的文本、press 的按键名如 'Enter' 等）。无需取值的动作留空。")
-    description: str = Field(..., description="这步操作的人类可读注释意图概述（比如：'点击提交按钮'、'验证错误弹窗显示'）")
+class SemanticStep(BaseModel):
+    action: ActionType = Field(..., description="纯语义动作类型，如 click, fill, expect_visible 等。")
+    target_description: str = Field(..., description="描述操作的目标元素（如：'邮箱输入框'、'页面右上角的保存按钮'，无需具体 CSS 选择器）")
+    value: Optional[str] = Field(None, description="当需要输入或验证时附加的值。无输入要求留空。")
+    intent_reason: str = Field(..., description="这步操作的理由，为什么要这么做（比如：'用于触发邮箱格式校验报错'）")
 
-class TestCaseIntent(BaseModel):
-    title: str = Field(..., description="测试用例标题，要求简洁反映测试内容")
-    description: str = Field(..., description="测试目的详述（中文），包括前置条件和预期结果的简要说明")
-    steps: List[TestActionSchema] = Field(..., description="序列化的测试步骤")
+class TestPlanCase(BaseModel):
+    title: str = Field(..., description="用例标题，如 '正确填写所有项并成功保存'")
+    description: str = Field(..., description="用例概要，说明用例主要测试的业务点、前置条件与验证目标。")
+    steps: List[SemanticStep] = Field(..., description="实现此用例的交互步骤列表")
 
-class AgentTestBlueprint(BaseModel):
-    page_summary: str = Field(..., description="对页面的核心功能区一两句话提炼总结")
-    test_cases: List[TestCaseIntent] = Field(..., description="根据提供的有效元素白名单编排的多条测试用例集")
+class TestPlanBlueprint(BaseModel):
+    page_summary: str = Field(..., description="对当前页面功能和所提取轨迹的简明总结")
+    test_cases: List[TestPlanCase] = Field(..., description="由模型规划的全部测试用例大纲列表，包含所有的正向和各种异常边界流")

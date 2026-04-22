@@ -13,10 +13,9 @@ import re
 from langgraph.graph import StateGraph, END
 from jinja2 import Environment, FileSystemLoader
 
-from .tools import CodeAnalyzerTool, DOMExtractorTool, TestStrategyTool
 from .langfuse_utils import get_langfuse_callback_handler
 from .schemas import AgentConfig, TestCaseInput
-from app.schemas.test_schema import AgentTestBlueprint, TestCaseIntent, TestActionSchema
+from app.schemas.test_schema import TestPlanBlueprint, TestPlanCase, SemanticStep
 
 class AgentState(TypedDict, total=False):
     input_data: TestCaseInput
@@ -26,7 +25,7 @@ class AgentState(TypedDict, total=False):
     page_summary: str
     element_whitelist: Dict[str, Any]
     
-    blueprint: AgentTestBlueprint
+    blueprint: TestPlanBlueprint
     
     test_cases: Annotated[List[Dict[str, Any]], operator.add]
     logs: Annotated[List[str], operator.add]
@@ -50,8 +49,8 @@ class TestCaseAgent:
         return log_msg
     
     def _build_graph(self) -> StateGraph:
-        async def understand_page(state: AgentState) -> dict:
-            logs_delta = [await self._log("info", "🔬 [步骤1] 大模型正在提取页面功能摘要...")]
+        async def analyze_context(state: AgentState) -> dict:
+            logs_delta = [await self._log("info", "🔬 [步骤1] 正在提炼页面核心功能摘要...")]
             source_code = state.get("source_code")
             if not source_code:
                 file_path = state["input_data"].file_path
@@ -74,181 +73,76 @@ class TestCaseAgent:
                     except:
                         pass
 
-            system_prompt = "你是一个专业的前端功能分析师。请根据提供的 Vue/HTML 源码和 DOM 结构，用不超过 50 个字的简练中文，总结这个页面的核心作用和主要的交互区域。"
-            user_prompt = f"【源码】\n```\n{source_code[:5000]}\n```\n\n【DOM概览】\n{str(dom_data)[:2000]}"
+            system_prompt = "你是一个专业的前端功能分析师。请根据提供的 Vue 源码和真实用户的基准交互流（ActionTrace），用不超过 50 个字的简练中文，总结这个页面的核心功能和交互主体。"
+            import json
+            user_prompt = f"【Vue源码】\n```\n{source_code[:5000]}\n```\n\n【动作轨迹概览(带DOM片段)】\n{json.dumps(dom_data, ensure_ascii=False)[:3000]}"
             
             try:
                 response = await self.config.llm_caller([
                     {"role": "system", "content": system_prompt}, 
                     {"role": "user", "content": user_prompt}
                 ])
-                logs_delta.append(await self._log("success", f"✅ 页面理解完成: {response.strip()}"))
+                logs_delta.append(await self._log("success", f"✅ 上下文分析完成: {response.strip()}"))
                 return {"page_summary": response.strip(), "source_code": source_code, "dom_data": dom_data, "logs": logs_delta}
             except Exception as e:
-                logs_delta.append(await self._log("error", f"❌ 页面理解失败: {e}"))
-                return {"error": f"页面理解失败: {e}", "logs": logs_delta}
-        
-        async def extract_whitelist(state: AgentState) -> dict:
-            logs_delta = [await self._log("info", "⚙️ [步骤2] 本地提取控件物理坐标白名单...")]
-            dom_data = state.get("dom_data")
-            whitelist = {}
-            if dom_data:
-                # 解析 dom_data 寻找 interactives
-                interactive = []
-                if isinstance(dom_data, dict):
-                    interactive = dom_data.get('interactive_elements', [])
-                elif isinstance(dom_data, list):
-                    interactive = dom_data
+                logs_delta.append(await self._log("error", f"❌ 上下文分析失败: {e}"))
+                return {"error": f"上下文分析失败: {e}", "logs": logs_delta}
                 
-                # 建立安全白名单字典
-                for i, elem in enumerate(interactive):
-                    elem_id = f"ELEM_{i:03d}"
-                    placeholder = elem.get("placeholder", "").strip()
-                    text_content = elem.get("text", "").strip()
-                    html_id = elem.get("id", "").strip()
-                    tag = elem.get("tag", "").lower()
-                    
-                    if html_id:
-                        selector = f"locator('#{html_id}')"
-                    elif placeholder:
-                        safe_ph = placeholder.replace('"', '\\"')
-                        selector = f'get_by_placeholder("{safe_ph}").first'
-                    elif text_content and tag in ['button', 'a']:
-                        safe_text = text_content.replace('"', '\\"')
-                        role = "link" if tag == 'a' else "button"
-                        selector = f'get_by_role("{role}", name="{safe_text}").first'
-                    elif text_content:
-                        safe_text = text_content.replace('"', '\\"')
-                        selector = f'get_by_text("{safe_text}").first'
-                    else:
-                        raw_sel = elem.get("selector", "")
-                        if not raw_sel:
-                            if elem.get("class"): raw_sel = f".{elem.get('class').split()[0]}"
-                            else: raw_sel = tag
-                        safe_sel = raw_sel.replace('"', '\\"')
-                        selector = f'locator("{safe_sel}").first'
-                    
-                    attrs = elem.get("attributes", {}) or {}
-                    # Try to deduce readonly from attr, class, or unselectable
-                    is_readonly = attrs.get("readonly") is not None or "readonly" in elem.get("class", "") or attrs.get("unselectable") == "on"
-                    role = attrs.get("role", "")
-                    
-                    whitelist[elem_id] = {
-                        "tag": elem.get("tag", "unknown"),
-                        "text": elem.get("text", "")[:30],
-                        "selector": selector,
-                        "type": elem.get("type", ""),
-                        "role": role,
-                        "readonly": is_readonly
-                    }
-            
-            logs_delta.append(await self._log("info", f"✅ 白名单提取完成，共获得 {len(whitelist)} 个可用靶标。"))
-            return {"element_whitelist": whitelist, "logs": logs_delta}
-            
-        async def plan_and_orchestrate(state: AgentState) -> dict:
-            logs_delta = [await self._log("info", "🧠 [步骤3] 调度大模型输出结构化意图 JSON...")]
+        async def generate_test_plan(state: AgentState) -> dict:
+            logs_delta = [await self._log("info", "🧠 [步骤2] 调度大模型输出测试用例规划大纲...")]
             summary = state.get("page_summary", "")
-            whitelist = state.get("element_whitelist", {})
-            
-            # Format whitelist for LLM
-            whitelist_str_lines = []
-            for k, v in whitelist.items():
-                desc = f"[{k}] 标签: <{v['tag']}>"
-                if v['type']: desc += f" 类型: {v['type']}"
-                if v['role']: desc += f" 角色: {v['role']}"
-                if v.get('readonly'): desc += f" [⚠️只读状态(不能fill,请改用click)]"
-                if v['text']: desc += f" 文本/内容: '{v['text']}'"
-                whitelist_str_lines.append(desc)
-            whitelist_str = "\n".join(whitelist_str_lines)
+            source_code = state.get("source_code", "")
+            action_trace = state.get("dom_data", {})
+            import json
             
             system_prompt = """你是一个专业的自动化测试架构师。
-你的任务是根据给定的页面摘要和严酷限定的【元素字典（白名单）】，设计出涵盖正向与异常流的测试用例集。
+你的任务是根据给定的页面源码、页面核心功能摘要，以及用户录制的真实交互基准流（ActionTrace，内含局部 HTML 片段），自由发散并设计出最合适的测试用例大纲。
 【核心规则】：
-1. 所有的动作 target_id MUST 且 ONLY 能从下方给定的白名单 ID (如 ELEM_001) 中选取！严禁随意自创 ID！如果某个元素不在白名单里，请调整测试策略避开它。
-2. 动作必须明确且颗粒度足够，比如 fill 值之后记得 click 提交。
-3. 遇到组件库渲染的 下拉框/选项(combobox) 或 带有 [⚠️只读] 标记的输入框时，绝对不要使用 fill 试图填充（会引发不可控的 Playwright Timeout），必须改用明确的 click 点击展开，然后紧跟下一个选项的 click。
-4. 【无断言不测试】：在每个测试用例的关键操作（如点击提交、保存、搜索等）之后，你**必须**使用大纲里的断言动作（如 `expect_visible`, `expect_text`）来验证预期结果！找白名单里可能出现的弹窗提示或结果文本做断言目标！没有断言的用例是全瞎的！"""
+1. 不受数量限制：请你尽可能多地考虑正向核心流程以及各种异常边界流（例如空值校验、格式错误拦截、无权限等），输出最合适的用例数量。
+2. 纯语义步骤：你在规划用例时，步骤的 `target_description` 只需要用自然语言清晰描述元素特征即可（例如：'页面顶部的登录按钮'、'用户名输入框'），不需要编写代码或选择器。
+3. 充分利用信息：仔细阅读 ActionTrace 中提供的 `dom_fragment`，它们展示了真实 DOM 渲染后的长相，能帮你精确定义元素。
+4. 【无断言不测试】：在每个测试用例的关键操作之后，你必须规划出断言步骤（如 `expect_visible` 或 `expect_text`），说明你想验证什么提示框或结果文本。"""
             
             user_prompt = f"""【页面核心功能摘要】:
 {summary}
 
-【可利用的元素字典（白名单）】:
-{whitelist_str}
+【录制的基准交互轨迹 (ActionTrace)】:
+{json.dumps(action_trace, indent=2, ensure_ascii=False)[:6000]}
 
-请输出完整的 TestCaseIntent 测试图纸！"""
+【Vue 源码参考】:
+{source_code[:6000]}
+
+请根据以上信息，不限数量地输出最完整、最严谨的 TestPlanBlueprint 测试用例规划！"""
             
             try:
+                from app.schemas.test_schema import TestPlanBlueprint
                 if self.config.structured_llm_caller:
                     blueprint = await self.config.structured_llm_caller(
                         [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], 
-                        AgentTestBlueprint
+                        TestPlanBlueprint
                     )
                 else:
                     raise Exception("当前模型接口未绑定 structured_llm_caller!")
                     
                 cases_count = len(blueprint.test_cases)
-                logs_delta.append(await self._log("success", f"✅ 意图图纸设计完成，包含 {cases_count} 个用例流水线。"))
-                return {"blueprint": blueprint, "logs": logs_delta}
+                logs_delta.append(await self._log("success", f"✅ 意图规划设计完成，共构思了 {cases_count} 个用例。"))
+                return {"blueprint": blueprint, "test_cases": blueprint.test_cases, "logs": logs_delta}
             except Exception as e:
-                logs_delta.append(await self._log("error", f"❌ 意图大纲生成失败: {e}"))
-                return {"error": f"意图大纲生成失败: {e}", "logs": logs_delta}
-                
-        async def compile_to_python(state: AgentState) -> dict:
-            blueprint = state.get("blueprint")
-            whitelist = state.get("element_whitelist", {})
-            logs_delta = [await self._log("info", "🏭 [步骤4] 启动 Jinja2 组装引擎，生成安全沙盒代码...")]
-            
-            test_cases = []
-            try:
-                template = self.jinja_env.get_template('playwright_test.py.j2')
-                
-                # 扁平化映射表用于模板查找
-                mapping = {k: v["selector"] for k, v in whitelist.items()}
-                
-                import uuid
-                
-                for i, case in enumerate(blueprint.test_cases):
-                    case_uid = str(uuid.uuid4()).replace('-', '_')[:8]
-                    # 渲染 Jinja
-                    script_content = template.render(
-                        case_uid=case_uid,
-                        case_title=case.title,
-                        case_description=case.description,
-                        base_url=state.get("input_data").page_url if state.get("input_data") else "http://localhost",
-                        steps=case.steps,
-                        mapping=mapping
-                    )
-                    
-                    test_cases.append({
-                        "title": case.title,
-                        "description": case.description,
-                        "script_content": script_content.strip(),
-                        "enabled": True
-                    })
-                    
-                logs_delta.append(await self._log("success", f"✅ 印刷厂流水线完成，所有 Python 代码已组装落库！"))
-                return {"test_cases": test_cases, "logs": logs_delta}
-            except Exception as e:
-                logs_delta.append(await self._log("error", f"❌ Jinja2 渲染失败: {e}"))
-                return {"error": f"代码渲染失败: {e}", "logs": logs_delta}
-                
+                logs_delta.append(await self._log("error", f"❌ 意图大纲规划失败: {e}"))
+                return {"error": f"意图大纲规划失败: {e}", "logs": logs_delta}
 
         def route_after_step(state: AgentState) -> str:
             if state.get("error"): return "error_end"
             return "next"
 
         workflow = StateGraph(AgentState)
-        workflow.add_node("understand_page", understand_page)
-        workflow.add_node("extract_whitelist", extract_whitelist)
-        workflow.add_node("plan_and_orchestrate", plan_and_orchestrate)
-        workflow.add_node("compile_to_python", compile_to_python)
+        workflow.add_node("analyze_context", analyze_context)
+        workflow.add_node("generate_test_plan", generate_test_plan)
         
-        workflow.set_entry_point("understand_page")
+        workflow.set_entry_point("analyze_context")
         
-        workflow.add_conditional_edges("understand_page", route_after_step, {"error_end": END, "next": "extract_whitelist"})
-        workflow.add_conditional_edges("extract_whitelist", route_after_step, {"error_end": END, "next": "plan_and_orchestrate"})
-        workflow.add_conditional_edges("plan_and_orchestrate", route_after_step, {"error_end": END, "next": "compile_to_python"})
-        workflow.add_conditional_edges("compile_to_python", route_after_step, {"error_end": END, "next": END})
+        workflow.add_conditional_edges("analyze_context", route_after_step, {"error_end": END, "next": "generate_test_plan"})
+        workflow.add_conditional_edges("generate_test_plan", route_after_step, {"error_end": END, "next": END})
         
         return workflow.compile()
     

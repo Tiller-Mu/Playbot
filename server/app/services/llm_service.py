@@ -48,7 +48,7 @@ async def get_llm_client() -> tuple[AsyncOpenAI, str]:
     return client, cfg["model"]
 
 
-async def get_langchain_chat_model(temperature: float = 0.2):
+async def get_langchain_chat_model(temperature: float = 0.2, max_tokens: int = 8192):
     """Return a LangChain ChatOpenAI compatible model."""
     from langchain_openai import ChatOpenAI
     cfg = await _get_llm_config()
@@ -59,6 +59,7 @@ async def get_langchain_chat_model(temperature: float = 0.2):
         api_key=cfg["api_key"],
         base_url=cfg["endpoint"],
         temperature=temperature,
+        max_tokens=max_tokens,
         timeout=LLM_TIMEOUT,
     )
     return model
@@ -67,7 +68,7 @@ async def get_langchain_chat_model(temperature: float = 0.2):
 async def llm_chat(
     messages: list[dict],
     temperature: float = 0.3,
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
 ) -> str:
     """Send a chat completion request and return the assistant message content."""
     client, model = await get_llm_client()
@@ -83,7 +84,7 @@ async def llm_chat(
 async def llm_chat_stream(
     messages: list[dict],
     temperature: float = 0.3,
-    max_tokens: int = 4096,
+    max_tokens: int = 8192,
     on_token: callable = None,
 ) -> str:
     """

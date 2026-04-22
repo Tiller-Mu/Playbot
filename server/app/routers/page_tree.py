@@ -477,26 +477,28 @@ async def generate_cases_with_agent(
                     break
                 except Exception as e:
                     print(f"[源码加载] 读取异常: {e}", flush=True)
-    
-    # 获取DOM数据（从录制会话中获取）
+    import re
+    if source_code:
+        # 移除样式相关的部分，减少大模型负担
+        source_code = re.sub(r'<style[^>]*>.*?</style>', '', source_code, flags=re.DOTALL | re.IGNORECASE)
+        source_code = source_code.strip()
+
+    # 获取最近的 ActionTrace 轨迹作为 dom_data 传给大模型
     dom_data = {}
     try:
-        from app.routers.recording import _get_session
-        session = _get_session(project.id)
+        from app.models.database import ActionTrace
+        from sqlalchemy import select
         
-        # 尝试匹配页面路径
-        if page.full_path in session.discovered_pages:
-            dom_data = session.discovered_pages[page.full_path].get('dom', {})
-        else:
-            # 尝试其他匹配方式（带/不带末尾斜杠）
-            alt_path = page.full_path.rstrip('/') if page.full_path.endswith('/') else page.full_path + '/'
-            if alt_path in session.discovered_pages:
-                dom_data = session.discovered_pages[alt_path].get('dom', {})
-        
-        if dom_data:
-            print(f"[智能体生成] 从录制会话获取DOM数据: {page.full_path}", flush=True)
+        trace_result = await db.execute(
+            select(ActionTrace).where(ActionTrace.page_id == page_id).order_by(ActionTrace.created_at.desc())
+        )
+        latest_trace = trace_result.scalars().first()
+        if latest_trace and latest_trace.trace_data:
+            import json
+            dom_data = json.loads(latest_trace.trace_data)
+            print(f"[智能体生成] 成功从数据库获取最新录制轨迹 (ActionTrace): {page_id}", flush=True)
     except Exception as e:
-        print(f"[智能体生成] 获取DOM数据失败: {e}", flush=True)
+        print(f"[智能体生成] 获取 ActionTrace 失败: {e}", flush=True)
     
     # 日志回调函数
     logs = []
@@ -553,15 +555,19 @@ async def generate_cases_with_agent(
                 
                 # 使用带心跳且实时的流式调用，绝对防御 100s 连接超时断开的问题
                 raw_content = await streaming_llm_caller(fallback_msgs)
-                content = raw_content.strip()
-                if "```" in content:
-                    match = re.search(r'```(?:json)?\s*(.*?)\s*```', content, re.DOTALL)
-                    if match:
-                        content = match.group(1).strip()
+                
                 try:
-                    return target_schema.model_validate_json(content)
+                    import json_repair
+                    import json
+                    # json_repair 能够自动剥离 markdown 标签、修复缺失括号(如 Token 截断)、修复无效符号，是工业级的高容错库
+                    repaired_json_str = json_repair.repair_json(raw_content)
+                    
+                    if not repaired_json_str:
+                        raise Exception("json_repair 返回了空的修复结果")
+                        
+                    return target_schema.model_validate_json(repaired_json_str)
                 except Exception as e2:
-                    raise Exception(f"清洗后仍无法解析: {e2}")
+                    raise Exception(f"经过 json_repair 强力修复后仍无法解析: {e2}")
 
         config = AgentConfig(
             llm_caller=streaming_llm_caller,
@@ -573,10 +579,10 @@ async def generate_cases_with_agent(
         # 创建智能体并生成
         agent = TestCaseAgent(config=config, log_callback=log_callback)
         
-        await log_callback("info", f"🚀 开始为页面 [{page.full_path}] 生成测试用例")
-        await log_callback("info", f"📄 源码长度: {len(source_code)} 字符")
+        await log_callback("info", f"🚀 开始为页面 [{page.full_path}] 规划测试用例（纯规划模式）")
+        await log_callback("info", f"📄 源码长度(已滤除样式): {len(source_code)} 字符")
         await log_callback("info", f"🌐 页面URL: {project.base_url}{page.path}")
-        await log_callback("info", f"📊 DOM数据: {'已获取' if dom_data else '未获取'} ({len(str(dom_data)) if dom_data else 0} 字符)")
+        await log_callback("info", f"📊 轨迹数据: {'已获取' if dom_data else '未获取'} ({len(str(dom_data)) if dom_data else 0} 字符)")
         
         input_data = TestCaseInput(
             page_url=f"{project.base_url}{page.path}",
@@ -591,12 +597,13 @@ async def generate_cases_with_agent(
         created_cases = []
         
         for case_data in test_cases:
+            # case_data 是 TestPlanCase 的实例
             tc = TestCase(
                 project_id=page.project_id,
                 page_id=page_id,
-                title=case_data.get("title", "未命名用例"),
-                description=case_data.get("description", ""),
-                script_content=case_data.get("script_content", ""),
+                title=case_data.title,
+                description=case_data.model_dump_json(indent=2, ensure_ascii=False),
+                script_content="# TODO: 本用例目前处于规划阶段。\n# 稍后将基于 description 中的语义规划详情，进一步完善可执行脚本。",
                 group_name=page.full_path,
                 enabled=True
             )
