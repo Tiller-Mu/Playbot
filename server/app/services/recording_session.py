@@ -17,6 +17,62 @@ EXTRACT_DOM_JS = """
 if (!window._playbotInitialized) {
     window._playbotInitialized = true;
     
+    function extractDomFragment(el) {
+        if (!el) return '';
+        try {
+            // 1. 寻找语义父容器 (最多向上找3层)，对于表单元素极其重要（为了捕获兄弟节点的 label）
+            let container = el;
+            let depth = 0;
+            const isFormElement = ['input', 'textarea', 'select'].includes(el.tagName.toLowerCase());
+            
+            if (isFormElement) {
+                while (container.parentElement && depth < 3 && container.tagName.toLowerCase() !== 'form') {
+                    container = container.parentElement;
+                    depth++;
+                    if (container.className && typeof container.className === 'string' && 
+                       (container.className.includes('form-item') || container.className.includes('field'))) {
+                        break;
+                    }
+                }
+            } else {
+                // button/a 等交互元素，拿上一层父级即可获取排版上下文
+                if (el.parentElement && el.parentElement.tagName.toLowerCase() !== 'body') {
+                    container = el.parentElement;
+                }
+            }
+            
+            // 2. 深拷贝并执行“Token 瘦身”清洗
+            const clone = container.cloneNode(true);
+            const trashTags = ['svg', 'path', 'script', 'style', 'iframe', 'canvas', 'video'];
+            trashTags.forEach(tag => {
+                const elements = clone.getElementsByTagName(tag);
+                for (let i = elements.length - 1; i >= 0; i--) {
+                    const placeholder = document.createElement('span');
+                    placeholder.textContent = `[${tag}]`;
+                    elements[i].parentNode.replaceChild(placeholder, elements[i]);
+                }
+            });
+            
+            let html = clone.outerHTML;
+            
+            // 3. 防爆策略：如果父容器太大（比如整个表格被抓进来了），降级只取元素自己
+            if (html.length > 1500) {
+                const selfClone = el.cloneNode(true);
+                trashTags.forEach(tag => {
+                    const elements = selfClone.getElementsByTagName(tag);
+                    for (let i = elements.length - 1; i >= 0; i--) {
+                        selfClone.removeChild(elements[i]);
+                    }
+                });
+                html = selfClone.outerHTML;
+            }
+            
+            return html.substring(0, 1500);
+        } catch (e) {
+            return el.outerHTML ? el.outerHTML.substring(0, 500) : '';
+        }
+    }
+
     function extractData(el) {
         try {
             const attrs = {};
@@ -47,10 +103,11 @@ if (!window._playbotInitialized) {
                 attrs: attrs,
                 path: path,
                 component: componentName,
-                url: window.location.href
+                url: window.location.href,
+                dom_fragment: extractDomFragment(el)
             };
         } catch (e) {
-            return { tag: 'error', text: String(e.message), attrs: {}, path: '', component: null, url: window.location.href };
+            return { tag: 'error', text: String(e.message), attrs: {}, path: '', component: null, url: window.location.href, dom_fragment: '' };
         }
     }
     

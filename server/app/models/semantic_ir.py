@@ -21,6 +21,7 @@ class TargetElement(BaseModel):
     text: Optional[str] = Field(None, description="Visible text of the element")
     component: Optional[str] = Field(None, description="Bounded component name if any")
     path: Optional[str] = Field(None, description="Fallback DOM path")
+    dom_fragment: Optional[str] = Field(None, description="Local HTML fragment surrounding the element")
 
 class SemanticAction(BaseModel):
     action: ActionType

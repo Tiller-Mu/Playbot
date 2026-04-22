@@ -11,6 +11,7 @@ import {
   FileOutlined,
   RobotOutlined,
   VideoCameraOutlined,
+  CopyOutlined,
 } from '@ant-design/icons-vue'
 import type { Project, TestPage } from '../types'
 import { projectApi, pageApi, generateApi } from '../services/api'
@@ -77,6 +78,21 @@ function showSnapshotModal(pageId?: string) {
   snapshotModal.value = {
     visible: true,
     pageId
+  }
+}
+
+// 复制JSON内容
+function copyToClipboard(text: string) {
+  if (!text) return
+  try {
+    const rawText = JSON.stringify(JSON.parse(text), null, 2)
+    navigator.clipboard.writeText(rawText).then(() => {
+      message.success('已复制到剪贴板')
+    }).catch(() => {
+      message.error('复制失败，可能是浏览器权限限制')
+    })
+  } catch (e) {
+    message.error('解析 JSON 数据失败')
   }
 }
 
@@ -848,7 +864,17 @@ onUnmounted(() => {
             <div v-for="(trace, index) in associationPanel.items" :key="trace.id" style="margin-bottom: 16px; border: 1px solid #ebedf0; border-radius: 4px; padding: 12px;">
               <div style="font-weight: bold; margin-bottom: 8px; color: #1890ff;">{{ trace.title }}</div>
               <div style="color: #666; font-size: 12px; margin-bottom: 12px;">{{ trace.description }}</div>
-              <div style="background: #1e1e1e; padding: 12px; border-radius: 4px; overflow-x: auto; max-height: 400px; overflow-y: auto;">
+              <div style="position: relative; background: #1e1e1e; padding: 12px; border-radius: 4px; overflow-x: auto; max-height: 400px; overflow-y: auto;">
+                <a-button 
+                  v-if="trace.trace_data"
+                  type="text" 
+                  size="small" 
+                  style="position: absolute; top: 8px; right: 8px; color: #999; background: rgba(255,255,255,0.1);"
+                  @click="copyToClipboard(trace.trace_data)"
+                  title="复制全量 JSON"
+                >
+                  <CopyOutlined /> 复制
+                </a-button>
                 <pre style="margin: 0; color: #d4d4d4; font-family: 'SF Mono', Consolas, monospace; font-size: 12px;">{{ trace.trace_data ? JSON.stringify(JSON.parse(trace.trace_data), null, 2) : '暂无数据' }}</pre>
               </div>
             </div>

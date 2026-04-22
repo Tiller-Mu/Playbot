@@ -39,7 +39,8 @@ class ActionNormalizer:
                 attributes=raw.get('attrs', {}),
                 text=raw.get('text', ''),
                 component=raw.get('component'),
-                path=raw.get('path', '')
+                path=raw.get('path', ''),
+                dom_fragment=raw.get('dom_fragment', '')
             )
             
             if act_type == 'input':
