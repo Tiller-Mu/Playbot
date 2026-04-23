@@ -79,6 +79,9 @@ class TestCase(Base):
     group_name = Column(String(100), default="default")
     tags = Column(String(500), default="")
     enabled = Column(Boolean, default=True)
+    is_compiled = Column(Boolean, default=False, comment="是否已编译为可执行代码")
+    latest_status = Column(String(50), nullable=True, comment="最新一次执行的状态 (passed, failed, 等)")
+    latest_error_message = Column(Text, nullable=True, comment="最新一次执行的报错日志")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

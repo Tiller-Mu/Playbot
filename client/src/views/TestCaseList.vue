@@ -139,6 +139,82 @@ async function handleRunSelected(headless: boolean = true) {
   }
 }
 
+const compiling = ref(false)
+async function handleCompileSelected() {
+  const ids = selectedIds.value.length > 0
+    ? selectedIds.value
+    : cases.value.filter(c => c.enabled).map(c => c.id)
+  if (ids.length === 0) {
+    message.warning('请选择要编译的用例')
+    return
+  }
+  
+  emit('clear-mcp-log')
+  emit('open-mcp-log')
+  emit('set-mcp-running', true)
+  
+  compiling.value = true
+  // 串行单线程执行，防止被大模型限流
+  try {
+    let successCount = 0
+    message.loading({ content: `正在依次编译 ${ids.length} 个脚本...`, key: 'compile_progress', duration: 0 })
+    
+    for (const [index, id] of ids.entries()) {
+      message.loading({ content: `编译中 (${index + 1}/${ids.length})...`, key: 'compile_progress', duration: 0 })
+      await testcaseApi.compile(id)
+      successCount++
+    }
+    
+    message.success({ content: `已成功编译 ${successCount} 个可执行脚本！`, key: 'compile_progress', duration: 3 })
+    await loadCases()
+  } catch (e: any) {
+    message.error({ content: `编译中断: ${e.response?.data?.detail || '未知错误'}`, key: 'compile_progress', duration: 5 })
+  } finally {
+    compiling.value = false
+    emit('set-mcp-running', false)
+  }
+}
+
+const healing = ref(false)
+async function handleHealSelected() {
+  const ids = selectedIds.value
+  if (ids.length === 0) {
+    message.warning('请选择需要自愈的失败用例')
+    return
+  }
+  
+  // 检查是否都包含错误信息
+  const failedCases = cases.value.filter(c => ids.includes(c.id) && ['failed', 'error'].includes(c.latest_status) && c.latest_error_message)
+  if (failedCases.length === 0) {
+    message.warning('选中的用例没有最近的执行报错日志，无法自愈')
+    return
+  }
+
+  emit('clear-mcp-log')
+  emit('open-mcp-log')
+  emit('set-mcp-running', true)
+  
+  healing.value = true
+  try {
+    let successCount = 0
+    message.loading({ content: `正在依次诊断修复 ${failedCases.length} 个失败脚本...`, key: 'heal_progress', duration: 0 })
+    
+    for (const [index, tc] of failedCases.entries()) {
+      message.loading({ content: `诊断中 (${index + 1}/${failedCases.length})...`, key: 'heal_progress', duration: 0 })
+      await testcaseApi.heal(tc.id, tc.latest_error_message!)
+      successCount++
+    }
+    
+    message.success({ content: `已成功自愈修复 ${successCount} 个脚本！`, key: 'heal_progress', duration: 3 })
+    await loadCases()
+  } catch (e: any) {
+    message.error({ content: `自愈中断: ${e.response?.data?.detail || '未知错误'}`, key: 'heal_progress', duration: 5 })
+  } finally {
+    healing.value = false
+    emit('set-mcp-running', false)
+  }
+}
+
 async function handleCreateCase() {
   if (!newForm.value.title || !newForm.value.description) {
     message.warning('请填写标题和描述')
@@ -171,10 +247,12 @@ const rowSelection = computed(() => ({
 
 const columns = [
   { title: '标题', dataIndex: 'title', key: 'title', ellipsis: true },
-  { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true, width: '35%' },
-  { title: '分组', dataIndex: 'group_name', key: 'group_name', width: 100 },
-  { title: '状态', key: 'enabled', width: 80, align: 'center' as const },
-  { title: '操作', key: 'actions', width: 160, align: 'center' as const },
+  { title: '描述', dataIndex: 'description', key: 'description', ellipsis: true, width: '25%' },
+  { title: '分组', dataIndex: 'group_name', key: 'group_name', width: 80 },
+  { title: '代码状态', key: 'code_status', width: 90, align: 'center' as const },
+  { title: '最近执行', key: 'exec_status', width: 100, align: 'center' as const },
+  { title: '启用', key: 'enabled', width: 60, align: 'center' as const },
+  { title: '操作', key: 'actions', width: 140, align: 'center' as const },
 ]
 
 // 监听 page_id 变化，重新加载用例
@@ -238,7 +316,24 @@ onMounted(loadCases)
           <RobotOutlined /> 
           {{ selectedPageIds.length > 0 ? `🤖 智能体生成 (${selectedPageIds.length})` : '🤖 智能体生成' }}
         </a-button>
-        <a-button @click="showNewModal = true"><PlusOutlined /> 新增用例</a-button>
+        <a-button 
+          type="primary" 
+          @click="handleCompileSelected" 
+          :loading="compiling"
+          style="background-color: #52c41a; border-color: #52c41a;"
+        >
+          ⚡ {{ selectedIds.length > 0 ? `编译脚本 (${selectedIds.length})` : '编译全部脚本' }}
+        </a-button>
+        <a-button 
+          type="primary" 
+          @click="handleHealSelected" 
+          :loading="healing"
+          style="background-color: #faad14; border-color: #faad14;"
+          :disabled="selectedIds.length === 0"
+        >
+          🏥 一键 AI 自愈 ({{ selectedIds.length }})
+        </a-button>
+        <a-button type="primary" @click="showNewModal = true"><PlusOutlined /> 新增用例</a-button>
         <a-dropdown placement="bottomRight">
           <a-button type="primary" :loading="executing">
             <PlayCircleOutlined />
@@ -267,6 +362,25 @@ onMounted(loadCases)
       :pagination="{ pageSize: 20, showSizeChanger: true }"
     >
       <template #bodyCell="{ column, record }">
+        <template v-if="column.key === 'code_status'">
+          <a-tag v-if="record.is_compiled" color="success">已编译</a-tag>
+          <a-tag v-else color="default">待编译</a-tag>
+        </template>
+        <template v-if="column.key === 'exec_status'">
+          <template v-if="record.latest_status">
+            <a-popover v-if="record.latest_status === 'failed' || record.latest_status === 'error'" title="报错详情">
+              <template #content>
+                <div style="max-width: 500px; max-height: 300px; overflow: auto; white-space: pre-wrap;">
+                  {{ record.latest_error_message }}
+                </div>
+              </template>
+              <a-tag color="error" style="cursor: pointer;">失败 (悬停查看)</a-tag>
+            </a-popover>
+            <a-tag v-else-if="record.latest_status === 'passed'" color="success">通过</a-tag>
+            <a-tag v-else color="default">{{ record.latest_status }}</a-tag>
+          </template>
+          <span v-else style="color: #999;">-</span>
+        </template>
         <template v-if="column.key === 'enabled'">
           <a-switch :checked="record.enabled" size="small" @change="handleToggle(record)" />
         </template>

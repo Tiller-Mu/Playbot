@@ -55,6 +55,7 @@ class TestCaseCreate(BaseModel):
     script_content: str | None = None
     group_name: str = "default"
     tags: str = ""
+    is_compiled: bool = False
 
 
 class TestCaseUpdate(BaseModel):
@@ -64,6 +65,7 @@ class TestCaseUpdate(BaseModel):
     group_name: str | None = None
     tags: str | None = None
     enabled: bool | None = None
+    is_compiled: bool | None = None
 
 
 class TestCaseOut(BaseModel):
@@ -77,13 +79,16 @@ class TestCaseOut(BaseModel):
     group_name: str
     tags: str
     enabled: bool
+    is_compiled: bool
+    latest_status: str | None = None
+    latest_error_message: str | None = None
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-# ---- NL Edit ----
+# ---- NL Edit / Heal ----
 class NLEditRequest(BaseModel):
     instruction: str  # 用户的自然语言修改指令
 
@@ -91,6 +96,10 @@ class NLEditRequest(BaseModel):
 class NLEditResponse(BaseModel):
     description: str  # 更新后的自然语言描述
     script_content: str  # 更新后的代码
+
+
+class HealRequest(BaseModel):
+    error_message: str  # 执行失败报错日志
 
 
 # ---- Execution ----

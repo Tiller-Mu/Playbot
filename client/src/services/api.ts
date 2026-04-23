@@ -59,6 +59,10 @@ export const testcaseApi = {
   delete: (id: string) => api.delete(`/testcase/${id}`),
   nlEdit: (id: string, instruction: string) =>
     api.post<{ description: string; script_content: string }>(`/testcase/${id}/edit`, { instruction }).then(r => r.data),
+  compile: (id: string) => 
+    api.post<TestCase>(`/testcase/${id}/compile`).then(r => r.data),
+  heal: (id: string, error_message: string) => 
+    api.post<TestCase>(`/testcase/${id}/heal`, { error_message }).then(r => r.data),
 }
 
 // ---- Generate ----

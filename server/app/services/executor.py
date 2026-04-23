@@ -213,6 +213,12 @@ async def _process_report(
             duration_ms=(call_info.get("duration", 0)) * 1000,
         )
         db.add(detail)
+        
+        # Update testcase latest status
+        tc = await db.get(TestCase, case_id)
+        if tc:
+            tc.latest_status = status
+            tc.latest_error_message = error_msg
 
         await ws_manager.broadcast(
             {

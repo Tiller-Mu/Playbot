@@ -73,6 +73,23 @@ async function handleSave() {
   }
 }
 
+const compileLoading = ref(false)
+async function handleCompile() {
+  if (!testCase.value) return
+  compileLoading.value = true
+  try {
+    message.loading({ content: '正在结合物理轨迹编译可执行脚本...', key: 'compile', duration: 0 })
+    const result = await testcaseApi.compile(caseId.value)
+    testCase.value.script_content = result.script_content
+    message.success({ content: '编译成功！代码已更新。', key: 'compile', duration: 3 })
+    showCode.value = true
+  } catch (e: any) {
+    message.error({ content: `编译失败: ${e.response?.data?.detail || '未知错误'}`, key: 'compile', duration: 5 })
+  } finally {
+    compileLoading.value = false
+  }
+}
+
 onMounted(loadCase)
 </script>
 
@@ -83,6 +100,14 @@ onMounted(loadCase)
       @back="router.back()"
     >
       <template #extra>
+        <a-button 
+          type="primary" 
+          @click="handleCompile" 
+          :loading="compileLoading"
+          style="background-color: #52c41a; border-color: #52c41a;"
+        >
+          🤖 从大纲编译脚本
+        </a-button>
         <a-button @click="showCode = !showCode">
           <CodeOutlined /> {{ showCode ? '隐藏代码' : '查看代码' }}
         </a-button>
