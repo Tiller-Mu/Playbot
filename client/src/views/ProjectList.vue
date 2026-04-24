@@ -136,8 +136,16 @@ async function handleDelete(id: string) {
 }
 
 async function handleSaveEdit() {
-  if (!form.value.name || !form.value.git_url || !form.value.base_url) {
-    message.warning('请填写完整信息')
+  if (!form.value.name || !form.value.base_url) {
+    message.warning('请填写项目名称和被测站点URL')
+    return
+  }
+  if (form.value.use_local_path && !form.value.local_path) {
+    message.warning('请填写本地代码路径')
+    return
+  }
+  if (!form.value.use_local_path && !form.value.git_url) {
+    message.warning('请填写Git仓库地址')
     return
   }
   
