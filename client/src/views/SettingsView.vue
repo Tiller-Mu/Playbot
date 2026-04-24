@@ -115,6 +115,12 @@ async function handleSave() {
     message.warning('请填写完整的 LLM 配置')
     return
   }
+  
+  if (form.value.llm_api_key.includes('*')) {
+    message.warning('当前显示的是脱敏后的 API Key，请重新输入完整的 API Key 后再保存')
+    return
+  }
+
   saveLoading.value = true
   try {
     await settingsApi.updateLLM(form.value)
@@ -129,12 +135,6 @@ async function handleSave() {
 async function handleVerify() {
   if (!form.value.llm_endpoint || !form.value.llm_api_key || !form.value.llm_model) {
     message.warning('请填写完整的 LLM 配置')
-    return
-  }
-  
-  // 检查 API Key 是否被脱敏（包含 * 号）
-  if (form.value.llm_api_key.includes('*')) {
-    message.warning('当前显示的是脱敏后的 API Key，请重新输入完整的 API Key 后再验证')
     return
   }
   

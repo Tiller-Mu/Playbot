@@ -61,11 +61,18 @@ async def update_llm_settings(data: LLMSettingsUpdate, db: AsyncSession = Depend
 
 
 @router.post("/llm/verify", response_model=LLMVerifyResponse)
-async def verify_llm(data: LLMVerifyRequest):
+async def verify_llm(data: LLMVerifyRequest, db: AsyncSession = Depends(get_db)):
     """验证 LLM 连接是否正常"""
+    api_key = data.llm_api_key
+    if "*" in api_key:
+        result = await db.execute(select(AppSettings).where(AppSettings.key == "llm_api_key"))
+        row = result.scalar_one_or_none()
+        if row and row.value:
+            api_key = row.value
+            
     success, message, model, interaction_log = await verify_llm_connection(
         data.llm_endpoint,
-        data.llm_api_key,
+        api_key,
         data.llm_model
     )
     return LLMVerifyResponse(
