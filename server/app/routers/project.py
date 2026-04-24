@@ -37,6 +37,8 @@ async def create_project(data: ProjectCreate, db: AsyncSession = Depends(get_db)
         branch=data.branch,
         base_url=data.base_url,
         repo_path=repo_path,  # 设置本地路径
+        username=data.username,
+        password=data.password,
     )
     db.add(project)
     await db.commit()

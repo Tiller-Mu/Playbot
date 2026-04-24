@@ -5,6 +5,8 @@ export interface Project {
   branch: string
   base_url: string
   repo_path: string | null
+  username?: string | null
+  password?: string | null
   created_at: string
   updated_at: string
 }
@@ -15,6 +17,8 @@ export interface ProjectCreate {
   branch?: string
   base_url: string
   local_path?: string  // 本地代码路径（可选）
+  username?: string | null
+  password?: string | null
 }
 
 export interface TestPage {

@@ -7,7 +7,7 @@ const api = axios.create({ baseURL: 'http://localhost:8004/api' })
 export const projectApi = {
   list: () => api.get<Project[]>('/project').then(r => r.data),
   get: (id: string) => api.get<Project>(`/project/${id}`).then(r => r.data),
-  create: (data: { name: string; git_url: string; branch: string; base_url: string }) =>
+  create: (data: { name: string; git_url: string; branch: string; base_url: string; username?: string | null; password?: string | null }) =>
     api.post<Project>('/project', data).then(r => r.data),
   update: (id: string, data: Partial<Project>) =>
     api.put<Project>(`/project/${id}`, data).then(r => r.data),

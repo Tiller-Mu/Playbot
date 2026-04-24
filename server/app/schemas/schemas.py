@@ -9,6 +9,8 @@ class ProjectCreate(BaseModel):
     branch: str = "main"
     base_url: str
     local_path: str | None = None  # 本地代码路径（可选）
+    username: str | None = None
+    password: str | None = None
 
 
 class ProjectUpdate(BaseModel):
@@ -16,6 +18,8 @@ class ProjectUpdate(BaseModel):
     git_url: str | None = None
     branch: str | None = None
     base_url: str | None = None
+    username: str | None = None
+    password: str | None = None
 
 
 class ProjectOut(BaseModel):
@@ -25,6 +29,8 @@ class ProjectOut(BaseModel):
     branch: str
     base_url: str
     repo_path: str | None
+    username: str | None = None
+    password: str | None = None
     created_at: datetime
     updated_at: datetime
 

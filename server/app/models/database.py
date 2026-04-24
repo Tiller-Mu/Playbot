@@ -31,6 +31,8 @@ class Project(Base):
     branch = Column(String(100), default="main")
     base_url = Column(String(500), nullable=False, comment="被测站点 URL")
     repo_path = Column(String(500), comment="本地代码路径")
+    username = Column(String(100), nullable=True, comment="全局探索账号-用户名")
+    password = Column(String(100), nullable=True, comment="全局探索账号-密码")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 

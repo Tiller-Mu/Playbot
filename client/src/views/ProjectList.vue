@@ -21,6 +21,8 @@ const form = ref({
   base_url: '',
   local_path: '',  // 本地代码路径
   use_local_path: false,  // 是否使用本地路径
+  username: '',
+  password: '',
 })
 
 // 分支列表相关
@@ -66,6 +68,8 @@ function handleEdit(project: Project) {
     base_url: project.base_url,
     local_path: project.repo_path || '',  // 显示已有的repo_path
     use_local_path: !!project.repo_path,  // 如果有repo_path，默认选中本地路径
+    username: project.username || '',
+    password: project.password || '',
   }
   branches.value = [] // 清空之前的分支列表
   showEditModal.value = true
@@ -101,6 +105,8 @@ async function handleCreate() {
       name: form.value.name,
       base_url: form.value.base_url,
       branch: form.value.branch,
+      username: form.value.username || null,
+      password: form.value.password || null,
     }
     
     if (form.value.use_local_path) {
@@ -114,7 +120,7 @@ async function handleCreate() {
     await projectApi.create(createData)
     message.success('项目创建成功')
     showModal.value = false
-    form.value = { name: '', git_url: '', branch: 'main', base_url: '', local_path: '', use_local_path: false }
+    form.value = { name: '', git_url: '', branch: 'main', base_url: '', local_path: '', use_local_path: false, username: '', password: '' }
     await loadProjects()
   } catch (e: any) {
     message.error(e.response?.data?.detail || '创建失败')
@@ -241,6 +247,23 @@ onMounted(loadProjects)
         <a-form-item label="被测站点 URL" required>
           <a-input v-model:value="form.base_url" placeholder="https://example.com 或 http://localhost:5173" />
         </a-form-item>
+        
+        <a-divider style="margin: 12px 0;" />
+        <div style="font-weight: 500; margin-bottom: 8px;">全局探索凭据 (可选)</div>
+        <div style="color: #999; font-size: 12px; margin-bottom: 16px;">智能体（Agent）在自动化探索时遇到登录拦截，将使用此凭据尝试突破</div>
+        
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="登录用户名">
+              <a-input v-model:value="form.username" placeholder="如：admin" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="登录密码">
+              <a-input-password v-model:value="form.password" placeholder="如：123456" />
+            </a-form-item>
+          </a-col>
+        </a-row>
       </a-form>
     </a-modal>
 
@@ -289,6 +312,23 @@ onMounted(loadProjects)
         <a-form-item label="被测站点 URL" required>
           <a-input v-model:value="form.base_url" placeholder="https://example.com" />
         </a-form-item>
+        
+        <a-divider style="margin: 12px 0;" />
+        <div style="font-weight: 500; margin-bottom: 8px;">全局探索凭据 (可选)</div>
+        <div style="color: #999; font-size: 12px; margin-bottom: 16px;">智能体（Agent）在自动化探索时遇到登录拦截，将使用此凭据尝试突破</div>
+        
+        <a-row :gutter="16">
+          <a-col :span="12">
+            <a-form-item label="登录用户名">
+              <a-input v-model:value="form.username" placeholder="如：admin" />
+            </a-form-item>
+          </a-col>
+          <a-col :span="12">
+            <a-form-item label="登录密码">
+              <a-input-password v-model:value="form.password" placeholder="新密码 (留空则不修改)" />
+            </a-form-item>
+          </a-col>
+        </a-row>
       </a-form>
     </a-modal>
   </div>
