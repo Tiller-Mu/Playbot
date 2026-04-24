@@ -156,7 +156,12 @@ async def verify_llm_connection(
     interaction_log = []
     
     try:
-        client = AsyncOpenAI(base_url=endpoint, api_key=api_key)
+        import httpx
+        client = AsyncOpenAI(
+            base_url=endpoint, 
+            api_key=api_key,
+            timeout=httpx.Timeout(10.0, connect=5.0)
+        )
         
         # 记录请求信息
         request_info = {

@@ -97,11 +97,16 @@ class TestCaseAgent:
             
             system_prompt = """你是一个专业的自动化测试架构师。
 你的任务是根据给定的页面源码、页面核心功能摘要，以及用户录制的真实交互基准流（ActionTrace，内含局部 HTML 片段），自由发散并设计出最合适的测试用例大纲。
-【核心规则】：
-1. 不受数量限制：请你尽可能多地考虑正向核心流程以及各种异常边界流（例如空值校验、格式错误拦截、无权限等），输出最合适的用例数量。
-2. 纯语义步骤：你在规划用例时，步骤的 `target_description` 只需要用自然语言清晰描述元素特征即可（例如：'页面顶部的登录按钮'、'用户名输入框'），不需要编写代码或选择器。
-3. 充分利用信息：仔细阅读 ActionTrace 中提供的 `dom_fragment`，它们展示了真实 DOM 渲染后的长相，能帮你精确定义元素。
-4. 【无断言不测试】：在每个测试用例的关键操作之后，你必须规划出断言步骤（如 `expect_visible` 或 `expect_text`），说明你想验证什么提示框或结果文本。"""
+
+【核心产出规范】：
+你的输出将被送入下游的“运行时执行引擎 (Execution Engine)”。你绝对不能写 CSS Selector，你只需提供寻找元素的【特征线索】和【沙盒范围】。
+
+1. 【沙盒范围 target_component】: 必须根据 Vue 源码提取该元素所在组件的文件路径（如 src/views/User.vue）。这极其重要，执行引擎将以此限制 DOM 搜索范围！
+2. 【目标特征 target_hint】: 提供明确的元素特征字典，包含 text(可见文本), tag(如button, input), role(如button, textbox), placeholder。
+   -> 特别注意：你必须仔细观察 ActionTrace 中的记录，如果轨迹中提供了该元素的 selector 或 xpath，请原封不动地将其填入 `recorded_selector` 字段！这将作为执行引擎的终极兜底策略！
+3. 【上下文特征 context_hint】: 提供父容器或区块特征字典，如 {"parent": "form", "section": "footer"}，帮助引擎在复杂嵌套中定位。
+4. 【无断言不测试】: 在每个测试用例的关键操作之后，必须规划出断言步骤（如 expect_visible 或 expect_text）。
+5. 考虑异常边界流：除正向流程外，发散构思空值校验、格式错误拦截等异常测试。"""
             
             user_prompt = f"""【页面核心功能摘要】:
 {summary}
@@ -128,8 +133,10 @@ class TestCaseAgent:
                 logs_delta.append(await self._log("success", f"✅ 意图规划设计完成，共构思了 {cases_count} 个用例。"))
                 return {"blueprint": blueprint, "test_cases": blueprint.test_cases, "logs": logs_delta}
             except Exception as e:
+                import traceback
+                error_trace = traceback.format_exc()
                 logs_delta.append(await self._log("error", f"❌ 意图大纲规划失败: {e}"))
-                return {"error": f"意图大纲规划失败: {e}", "logs": logs_delta}
+                return {"error": f"意图大纲规划失败: {e}\n{error_trace}", "logs": logs_delta}
 
         def route_after_step(state: AgentState) -> str:
             if state.get("error"): return "error_end"

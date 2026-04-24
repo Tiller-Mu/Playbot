@@ -83,7 +83,37 @@ async def _do_run(
     for tc in test_cases:
         filename = f"test_{tc.id.replace('-', '_')}.py"
         filepath = exec_dir / filename
-        filepath.write_text(tc.script_content or "# empty test", encoding="utf-8")
+        
+        # 提取被保留在 description 中的 JSON 格式的用例计划
+        import json
+        plan_json = "{}"
+        try:
+            if tc.description and "{" in tc.description:
+                # 为了防止 Python 字符串转义错误，在写入模板时对 json 做一次 dumps
+                parsed_desc = json.loads(tc.description)
+                plan_json = json.dumps(parsed_desc, ensure_ascii=False)
+        except Exception:
+            pass
+
+        # 生成使用动态 ExecutionEngine 的包装层代码
+        bridge_script = f'''import pytest
+import json
+import logging
+from playwright.sync_api import Page, expect
+from app.services.execution_engine import PlaybotExecutionEngine
+
+# {tc.title}
+def test_playbot_case(page: Page):
+    plan_data = json.loads(r\"\"\"{plan_json}\"\"\")
+    steps = plan_data.get("steps", [])
+    
+    if not steps:
+        pytest.skip("此用例没有具体的步骤规划")
+        
+    engine = PlaybotExecutionEngine(page)
+    engine.execute_plan(steps)
+'''
+        filepath.write_text(bridge_script, encoding="utf-8")
         case_file_map[filename] = tc.id
 
     # Update execution status

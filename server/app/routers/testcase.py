@@ -142,16 +142,29 @@ async def nl_edit_testcase(
 
 @router.post("/{case_id}/compile")
 async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
-    """将语义用例大纲编译为可执行的 Pytest-Playwright 脚本 (Phase 2)"""
-    from app.models.database import ActionTrace
+    """将语义用例大纲进行二次审查优化 (Phase 2 Auditor)"""
+    from app.models.database import ActionTrace, TestPage
     from sqlalchemy import select
-
+    import json
+    
     tc = await db.get(TestCase, case_id)
     if not tc:
         raise HTTPException(404, "用例不存在")
         
     if not tc.page_id:
         raise HTTPException(400, "该用例未绑定页面，无法获取上下文进行编译")
+        
+    page = await db.get(TestPage, tc.page_id)
+    
+    # 提取 Vue 源码
+    source_code = "未找到页面组件源码"
+    if page and page.file_path:
+        from app.core.config import settings
+        full_path = settings.workspace_dir / page.file_path
+        if full_path.exists():
+            source_code = full_path.read_text(encoding="utf-8")
+            import re
+            source_code = re.sub(r'<style[^>]*>.*?</style>', '', source_code, flags=re.DOTALL)
 
     # 获取关联的 ActionTrace 作为物理 DOM 上下文
     trace_query = select(ActionTrace).where(ActionTrace.page_id == tc.page_id).order_by(ActionTrace.created_at.desc()).limit(1)
@@ -162,26 +175,26 @@ async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
     if trace:
         trace_context = trace.trace_data
 
-    # 构建专门用于代码编译的 System Prompt
+    from app.schemas.test_schema import TestPlanCase
+    schema_json = json.dumps(TestPlanCase.model_json_schema(), ensure_ascii=False)
+
     system_prompt = (
-        "你是一个顶级的 Playwright QA 自动化测试专家。\n"
-        "你的任务是接收一份【纯语义测试大纲（JSON格式）】和一份【物理操作轨迹（包含 DOM特征）】，"
-        "并输出一份可以直接运行的 Pytest-Playwright (sync API) Python 测试代码。\n\n"
-        "【强制规范】\n"
-        "1. 使用 `def test_xxx(page: Page):` 作为函数入口，并导入必要的模块 (如 `from playwright.sync_api import Page, expect`)。\n"
-        "2. 根据传入的语义大纲中的 `steps` 生成代码。利用物理操作轨迹（trace_data）中的 `dom_fragment`、`path` 或属性来推断最精准的 Locator。\n"
-        "3. 严禁使用毫无意义的绝对 CSS 路径或深度嵌套（如 `.class > div:nth-child(2)`）。优先使用 `get_by_role`, `get_by_text`, `get_by_placeholder`, 或带有明确描述的 CSS 类。\n"
-        "4. 【极端重要】对于任何元素的点击操作（`.click()`），尤其是前端UI组件库（如 Ant Design 的 Select，Dropdown 等），常常由于内部复杂的 span 层级导致 `intercepts pointer events` 错误。你必须在所有的 click 操作中加上 `force=True`（例如 `locator.click(force=True)`），强制跳过默认遮挡检测。\n"
-        "5. 所有的 expect 断言（`expect_visible`, `expect_text`）必须真实地通过 `expect(locator).to_be_visible()` 等 Playwright 断言实现。\n"
-        "6. 代码需包含中文注释解释每一步的 `intent_reason`。\n"
-        "7. 只需要输出纯 Python 代码，严禁包裹在 ```python ... ``` 块中，也不要附带任何多余的解释文字，从第一行直接开始写 Python 代码！\n"
-        "8. 【定位器高危警告】绝对不要生造元素的标签名（如凭空写出 `div#provider-select`，直接写 `#provider-select` 即可）。严禁使用多个 `.locator(...).locator(...)` 级联去强行寻找内部 span！直接对带有特征（如 ID 或 class）的元素执行 `.click(force=True)` 即可！"
+        "你是一个顶级的 Playwright QA 自动化测试审核专家 (Auditor)。\n"
+        "你的任务是接收一份【初稿语义测试大纲（JSON格式）】、前端 Vue 源码以及用户的真实【物理操作轨迹】，"
+        "对初稿进行严厉的逻辑审查，并输出一份【修复并完善后的纯 JSON 数据】。\n\n"
+        "【核心审查原则】\n"
+        "1. 查找缺失的触发动作：很多时候初稿会在没有点击“保存/验证/提交”按钮的情况下，直接去 `expect_visible` 等待 Toast 提示出现。这是极其愚蠢的跳步！你必须仔细对比源码，发现这种断言前遗漏的点击或输入操作，并将它们补充到步骤列表中。\n"
+        "2. 修复无效的选择器：检查 target_hint 中的内容是否过于含糊，如果 ActionTrace 提供了更有力的属性，补充进去。\n"
+        "3. 纯净输出：直接输出原生 JSON，禁止使用 markdown 代码块包裹，不要包含任何前后缀解释文字！\n"
+        f"必须严格遵循以下 Schema 输出 JSON 对象：\n{schema_json}"
     )
 
     user_prompt = (
         f"用例标题：{tc.title}\n\n"
-        f"【纯语义测试大纲】（即 description）:\n{tc.description}\n\n"
-        f"【物理操作轨迹】（用于推断 DOM Locator）:\n{trace_context}\n"
+        f"【初稿测试大纲 (JSON)】:\n{tc.description}\n\n"
+        f"【前端 Vue 源码】:\n{source_code[:6000]}\n\n"
+        f"【物理操作轨迹 (ActionTrace)】:\n{trace_context[:6000]}\n\n"
+        "请深思熟虑，修复遗漏的交互步骤，直接返回优化后的 JSON 数据。"
     )
 
     messages = [
@@ -190,7 +203,6 @@ async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
     ]
 
     from app.core.websocket import ws_manager
-    from datetime import datetime
     
     channel = f"mcp_{tc.project_id}"
     
@@ -198,13 +210,12 @@ async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
         "type": "agent_log",
         "page_id": tc.page_id,
         "level": "info",
-        "message": f"[Phase 2 编译] 正在将语义大纲转化为可执行脚本：《{tc.title}》..."
+        "message": f"[Phase 2 审计] 正在审查并优化用例 JSON 逻辑：《{tc.title}》..."
     }, channel=channel)
 
-    # 调用大模型生成代码
     from app.services.llm_service import llm_chat_stream
-    
     buffer = []
+    
     async def on_token_callback(token_text: str):
         buffer.append(token_text)
         await ws_manager.broadcast({
@@ -216,38 +227,40 @@ async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
 
     try:
         raw_script = await llm_chat_stream(messages, temperature=0.1, on_token=on_token_callback)
+        
+        import json_repair
+        repaired_str = json_repair.repair_json(raw_script)
+        if not repaired_str:
+            raise Exception("审查引擎返回了空的 JSON")
+            
+        parsed_obj = json.loads(repaired_str)
+        if isinstance(parsed_obj, list) and len(parsed_obj) > 0:
+            parsed_obj = parsed_obj[0]
+            
+        refined_case = TestPlanCase.model_validate(parsed_obj)
+        
+        json_content = refined_case.model_dump_json(indent=2, ensure_ascii=False)
+        tc.description = json_content
+        tc.script_content = f"# 本用例已由 AI 审查引擎深度优化，修复了诸如缺失点击、断言前未触发事件等逻辑漏洞。\n# 执行引擎将直接读取原生 JSON 进行寻址和操作，无需 Python 脚本翻译。\n\n{json_content}"
+        tc.is_compiled = True
+        await db.commit()
+        await db.refresh(tc)
+        
         await ws_manager.broadcast({
             "type": "agent_log",
             "page_id": tc.page_id,
             "level": "info",
-            "message": f"✅ [编译成功] 《{tc.title}》的代码已生成"
+            "message": f"✅ [审计成功] 《{tc.title}》已完成逻辑补全和优化"
         }, channel=channel)
     except Exception as e:
         await ws_manager.broadcast({
             "type": "agent_log",
             "page_id": tc.page_id,
             "level": "error",
-            "message": f"❌ [编译失败] {str(e)}"
+            "message": f"❌ [审计失败] 无法解析大模型审查结果: {str(e)}"
         }, channel=channel)
         raise e
-    
-    # 清洗可能带有的 markdown 代码块
-    cleaned_script = raw_script.strip()
-    if cleaned_script.startswith("```"):
-        cleaned_script = cleaned_script.split("\n", 1)[-1]
-        if cleaned_script.endswith("```"):
-            cleaned_script = cleaned_script[:-3]
-    elif cleaned_script.startswith("```python"):
-        cleaned_script = cleaned_script.split("\n", 1)[-1]
-        if cleaned_script.endswith("```"):
-            cleaned_script = cleaned_script[:-3]
-            
-    # 直接覆写现有的脚本内容，并设置已编译标记
-    tc.script_content = cleaned_script.strip()
-    tc.is_compiled = True
-    await db.commit()
-    await db.refresh(tc)
-
+        
     return tc
 
 

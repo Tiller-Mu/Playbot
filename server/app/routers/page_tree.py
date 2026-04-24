@@ -565,7 +565,11 @@ async def generate_cases_with_agent(
                     if not repaired_json_str:
                         raise Exception("json_repair 返回了空的修复结果")
                         
-                    return target_schema.model_validate_json(repaired_json_str)
+                    parsed_obj = json.loads(repaired_json_str)
+                    if isinstance(parsed_obj, list) and len(parsed_obj) > 0:
+                        parsed_obj = parsed_obj[0]
+                        
+                    return target_schema.model_validate(parsed_obj)
                 except Exception as e2:
                     raise Exception(f"经过 json_repair 强力修复后仍无法解析: {e2}")
 

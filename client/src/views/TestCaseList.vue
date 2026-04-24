@@ -27,7 +27,7 @@ const executing = ref(false)
 const agentGenerating = ref(false)  // 智能体生成状态
 const selectedPageIds = ref<string[]>([])  // 从ProjectDetail传入的选中页面
 
-// 智能体生成结果
+// AI用例规划结果
 const showAgentResult = ref(false)
 const agentResult = ref<{
   page_path: string;
@@ -75,7 +75,7 @@ async function loadCases() {
 }
 
 
-// 智能体生成用例（LangGraph）
+// AI用例规划（LangGraph）
 async function handleAgentGenerate() {
   if (selectedPageIds.value.length === 0) {
     message.warning('请先在左侧勾选一个或多个页面')
@@ -83,7 +83,7 @@ async function handleAgentGenerate() {
   }
   
   if (selectedPageIds.value.length > 1) {
-    message.info('智能体生成暂只支持单页面，将使用第一个选中的页面')
+    message.info('AI用例规划暂只支持单页面，将使用第一个选中的页面')
   }
   
   agentGenerating.value = true
@@ -98,10 +98,10 @@ async function handleAgentGenerate() {
     agentResult.value = result
     showAgentResult.value = true
     
-    message.success(`智能体生成完成！共 ${result.generated_count} 个用例`)
+    message.success(`AI用例规划完成！共 ${result.generated_count} 个用例`)
     await loadCases()
   } catch (e: any) {
-    message.error(e.response?.data?.detail || '智能体生成失败')
+    message.error(e.response?.data?.detail || 'AI用例规划失败')
   } finally {
     agentGenerating.value = false
     emit('set-mcp-running', false)
@@ -157,18 +157,18 @@ async function handleCompileSelected() {
   // 串行单线程执行，防止被大模型限流
   try {
     let successCount = 0
-    message.loading({ content: `正在依次编译 ${ids.length} 个脚本...`, key: 'compile_progress', duration: 0 })
+    message.loading({ content: `正在依次生成 ${ids.length} 个用例...`, key: 'compile_progress', duration: 0 })
     
     for (const [index, id] of ids.entries()) {
-      message.loading({ content: `编译中 (${index + 1}/${ids.length})...`, key: 'compile_progress', duration: 0 })
+      message.loading({ content: `生成中 (${index + 1}/${ids.length})...`, key: 'compile_progress', duration: 0 })
       await testcaseApi.compile(id)
       successCount++
     }
     
-    message.success({ content: `已成功编译 ${successCount} 个可执行脚本！`, key: 'compile_progress', duration: 3 })
+    message.success({ content: `已成功生成 ${successCount} 个经过审查优化的用例！`, key: 'compile_progress', duration: 3 })
     await loadCases()
   } catch (e: any) {
-    message.error({ content: `编译中断: ${e.response?.data?.detail || '未知错误'}`, key: 'compile_progress', duration: 5 })
+    message.error({ content: `生成中断: ${e.response?.data?.detail || '未知错误'}`, key: 'compile_progress', duration: 5 })
   } finally {
     compiling.value = false
     emit('set-mcp-running', false)
@@ -314,7 +314,7 @@ onMounted(loadCases)
           danger
         >
           <RobotOutlined /> 
-          {{ selectedPageIds.length > 0 ? `🤖 智能体生成 (${selectedPageIds.length})` : '🤖 智能体生成' }}
+          {{ selectedPageIds.length > 0 ? `🤖 AI用例规划 (${selectedPageIds.length})` : '🤖 AI用例规划' }}
         </a-button>
         <a-button 
           type="primary" 
@@ -322,7 +322,7 @@ onMounted(loadCases)
           :loading="compiling"
           style="background-color: #52c41a; border-color: #52c41a;"
         >
-          ⚡ {{ selectedIds.length > 0 ? `编译脚本 (${selectedIds.length})` : '编译全部脚本' }}
+          ⚡ {{ selectedIds.length > 0 ? `AI用例生成 (${selectedIds.length})` : '生成全部用例' }}
         </a-button>
         <a-button 
           type="primary" 
@@ -363,8 +363,8 @@ onMounted(loadCases)
     >
       <template #bodyCell="{ column, record }">
         <template v-if="column.key === 'code_status'">
-          <a-tag v-if="record.is_compiled" color="success">已编译</a-tag>
-          <a-tag v-else color="default">待编译</a-tag>
+          <a-tag v-if="record.is_compiled" color="success">已生成</a-tag>
+          <a-tag v-else color="default">待生成</a-tag>
         </template>
         <template v-if="column.key === 'exec_status'">
           <template v-if="record.latest_status">
