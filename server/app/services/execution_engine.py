@@ -81,7 +81,7 @@ class PlaybotExecutionEngine:
                 
                 for (let i = 0; i < elements.length; i++) {{
                     let el = elements[i];
-                    let elText = el.innerText || el.value || '';
+                    let elText = el.textContent || el.value || '';
                     
                     // 恢复“软打分”的预过滤：只要命中了任何一个线索，就放进候选池，交给 Python 去精细打分
                     let isMatch = false;
@@ -180,69 +180,36 @@ class PlaybotExecutionEngine:
         hint = step.get("target_hint", {})
         if not hint:
             return None
+            
+        timeout_sec = 15.0 if step.get("action") == "expect_visible" else 5.0
+        start_time = time.time()
         
-        # 1. 用 text 直接全局找
+        candidates = []
         if hint.get("text"):
-            # 精确匹配优先
-            loc = self.page.get_by_text(hint["text"], exact=True)
-            try:
-                loc.first.wait_for(state="attached", timeout=15000)
-                logger.info("Fallback succeeded using exact text")
-                return loc.first
-            except:
-                pass
-
-            # 模糊匹配
-            loc = self.page.get_by_text(hint["text"], exact=False)
-            try:
-                loc.first.wait_for(state="attached", timeout=15000)
-                logger.info("Fallback succeeded using fuzzy text")
-                return loc.first
-            except:
-                pass
-
-        # 2. 用 role 全局找
+            candidates.append(("exact text", self.page.get_by_text(hint["text"], exact=True)))
+            candidates.append(("fuzzy text", self.page.get_by_text(hint["text"], exact=False)))
+            
         if hint.get("role"):
             name_arg = hint.get("text")
             if name_arg:
-                loc = self.page.get_by_role(hint["role"], name=name_arg)
-                try:
-                    loc.first.wait_for(state="attached", timeout=15000)
-                    logger.info("Fallback succeeded using role with name")
-                    return loc.first
-                except:
-                    pass
-                
-                # 如果带名字找不到（大模型脑补的名字可能和实际渲染的不一致），退化为仅靠 role 查找
-                loc = self.page.get_by_role(hint["role"])
-                try:
-                    loc.first.wait_for(state="attached", timeout=15000)
-                    logger.info("Fallback succeeded using pure role (fuzzy fallback)")
-                    return loc.first
-                except:
-                    pass
-            else:
-                loc = self.page.get_by_role(hint["role"])
-                try:
-                    loc.first.wait_for(state="attached", timeout=15000)
-                    logger.info("Fallback succeeded using pure role")
-                    return loc.first
-                except:
-                    pass
-                
-        # 3. 终极保底：如果录制轨迹中留下了原始的 selector，直接使用
+                candidates.append(("role with name", self.page.get_by_role(hint["role"], name=name_arg)))
+            candidates.append(("pure role", self.page.get_by_role(hint["role"])))
+            
         if hint.get("recorded_selector"):
             selector = hint["recorded_selector"]
-            # 过滤掉极端脆弱的绝对层级路径（Playwright 原生录制经常会生成几十个 div 级联的垃圾选择器）
             if selector.count("> div") < 5:
-                loc = self.page.locator(selector)
-                try:
-                    loc.first.wait_for(state="attached", timeout=15000)
-                    logger.info(f"Fallback succeeded using recorded_selector: {selector}")
-                    return loc.first
-                except Exception as e:
-                    logger.debug(f"Recorded selector fallback failed: {e}")
+                candidates.append(("recorded_selector", self.page.locator(selector)))
 
+        while time.time() - start_time < timeout_sec:
+            for strategy, loc in candidates:
+                try:
+                    if loc.count() > 0:
+                        logger.info(f"Fallback succeeded using {strategy}")
+                        return loc.first
+                except Exception:
+                    pass
+            time.sleep(0.5)
+            
         return None
 
     def _resolve_locator(self, step: dict) -> Optional[Locator]:
