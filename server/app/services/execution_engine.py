@@ -18,23 +18,27 @@ class PlaybotExecutionEngine:
 
     def execute_plan(self, steps: List[dict]):
         for step_data in steps:
-            # step_data 可能是 dict, 转换为方便访问的对象形式
             step = step_data if isinstance(step_data, dict) else dict(step_data)
             
             logger.info(f"Executing step: {step.get('action')} - {step.get('intent_reason')}")
+            
+            start_resolve = time.time()
             locator = self._resolve_locator(step)
+            resolve_time = time.time() - start_resolve
+            logger.info(f"[Timer] _resolve_locator took {resolve_time:.2f} seconds")
             
             if locator is None and step.get("action") not in ["navigate", "custom_script"]:
-                # 记录快照以便后续自愈
-                snapshot = "Could not capture snapshot" # In a real scenario, capture DOM snapshot
-                
-                # 如果是断言类型的操作，定位失败应当被视为业务断言失败（比如超时没弹框等）
+                snapshot = "Could not capture snapshot"
                 if step.get("action") == "expect_visible":
-                    raise AssertionError(f"UI 断言失败：预期的元素（{step.get('intent_reason', '未知')}）在超时时间内未在页面上出现。请检查后端是否超时或渲染状态是否异常。\n寻址目标: {step.get('target_hint')}")
+                    raise AssertionError(f"UI 断言失败：预期的元素（{step.get('intent_reason', '未知')}）在超时时间内未出现。\n寻址目标: {step.get('target_hint')}")
                 else:
-                    raise ResolveError(step, f"UI 寻址失败：无法在页面上找到操作目标（{step.get('intent_reason', '未知')}）。可能是页面尚未渲染完成或元素已被移除。\n寻址目标: {step.get('target_hint')}")
+                    raise ResolveError(step, f"UI 寻址失败：无法找到操作目标（{step.get('intent_reason', '未知')}）。\n寻址目标: {step.get('target_hint')}")
                 
+            start_exec = time.time()
             self._execute_action(locator, step)
+            exec_time = time.time() - start_exec
+            logger.info(f"[Timer] _execute_action took {exec_time:.2f} seconds")
+            
             self._post_validate(step)
 
     def _get_scopes(self, step: dict) -> List[Locator]:
@@ -108,7 +112,7 @@ class PlaybotExecutionEngine:
                     if (results.length >= 50) break;
                 }}
                 return results;
-            }}''')
+            }}''', timeout=500)
         except Exception as e:
             logger.debug(f"Failed to batch extract candidate info: {e}")
             return []
