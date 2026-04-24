@@ -250,7 +250,10 @@ class PlaybotExecutionEngine:
 
         if action == "navigate":
             if value:
-                self.page.goto(value)
+                try:
+                    self.page.goto(value, wait_until="domcontentloaded", timeout=15000)
+                except Exception as e:
+                    logger.warning(f"Navigation to {value} timed out or failed: {e}")
         elif action == "click":
             locator.click(force=True)
         elif action == "fill":
