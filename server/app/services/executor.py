@@ -62,6 +62,19 @@ async def _do_run(
         await db.commit()
         return
 
+    from app.models.database import Project
+    project = await db.get(Project, execution.project_id)
+    credentials_dict = {}
+    if project:
+        if project.username:
+            credentials_dict["username"] = project.username
+        if project.password:
+            credentials_dict["password"] = project.password
+        if project_base_url:
+            credentials_dict["login_url"] = project_base_url
+    import json
+    credentials_json = json.dumps(credentials_dict, ensure_ascii=False)
+
     # Create temp test directory for this execution
     exec_dir = settings.tests_dir / execution_id
     exec_dir.mkdir(parents=True, exist_ok=True)
@@ -100,7 +113,7 @@ async def _do_run(
 import json
 import logging
 from playwright.sync_api import Page, expect
-from app.services.execution_engine import PlaybotExecutionEngine
+from app.services.execution_engine import PlaybotExecutionEngine, StepExecutionError
 
 # {tc.title}
 def test_playbot_case(page: Page):
@@ -110,8 +123,12 @@ def test_playbot_case(page: Page):
     if not steps:
         pytest.skip("此用例没有具体的步骤规划")
         
-    engine = PlaybotExecutionEngine(page)
-    engine.execute_plan(steps)
+    credentials = json.loads(r\"\"\"{credentials_json}\"\"\")
+    engine = PlaybotExecutionEngine(page, credentials)
+    try:
+        engine.execute_plan(steps)
+    except StepExecutionError as e:
+        pytest.fail(f"Step {{e.step_index}} Failed: {{e.message}}")
 '''
         filepath.write_text(bridge_script, encoding="utf-8")
         case_file_map[filename] = tc.id
@@ -146,19 +163,36 @@ def test_playbot_case(page: Page):
     env["PATH"] = os.path.expanduser("~/.local/bin") + os.pathsep + env.get("PATH", "")
 
     log.info("Running: %s", " ".join(cmd_parts))
+    log.info("Working dir: %s", settings.base_dir)
 
     import subprocess
-    process = await asyncio.to_thread(
-        subprocess.run,
-        cmd_parts,
-        capture_output=True,
-        env=env,
-    )
+    try:
+        process = await asyncio.to_thread(
+            subprocess.run,
+            cmd_parts,
+            capture_output=True,
+            timeout=300,
+            cwd=str(settings.base_dir),
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        log.error("pytest subprocess timed out after 300s")
+        execution.status = "error"
+        execution.end_time = datetime.now(timezone.utc)
+        await db.commit()
+        await ws_manager.broadcast(
+            {"type": "execution:complete", "execution_id": execution_id, "status": "error", "message": "执行超时（5分钟）"},
+            channel=f"execution:{execution_id}",
+        )
+        return
+
     stdout, stderr = process.stdout, process.stderr
 
     log.info("pytest exit code: %s", process.returncode)
+    if stdout:
+        log.info("pytest stdout:\n%s", stdout.decode(errors="replace")[:3000])
     if stderr:
-        log.debug("pytest stderr:\n%s", stderr.decode(errors="replace")[:2000])
+        log.warning("pytest stderr:\n%s", stderr.decode(errors="replace")[:3000])
 
     # Parse results
     if report_path.exists():

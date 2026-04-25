@@ -483,8 +483,8 @@ async def generate_cases_with_agent(
         source_code = re.sub(r'<style[^>]*>.*?</style>', '', source_code, flags=re.DOTALL | re.IGNORECASE)
         source_code = source_code.strip()
 
-    # 获取最近的 ActionTrace 轨迹作为 dom_data 传给大模型
-    dom_data = {}
+    # 获取最近的 ActionTrace 轨迹作为 intent_plan 传给大模型
+    intent_plan = {}
     try:
         from app.models.database import ActionTrace
         from sqlalchemy import select
@@ -495,7 +495,7 @@ async def generate_cases_with_agent(
         latest_trace = trace_result.scalars().first()
         if latest_trace and latest_trace.trace_data:
             import json
-            dom_data = json.loads(latest_trace.trace_data)
+            intent_plan = json.loads(latest_trace.trace_data)
             print(f"[智能体生成] 成功从数据库获取最新录制轨迹 (ActionTrace): {page_id}", flush=True)
     except Exception as e:
         print(f"[智能体生成] 获取 ActionTrace 失败: {e}", flush=True)
@@ -586,13 +586,13 @@ async def generate_cases_with_agent(
         await log_callback("info", f"🚀 开始为页面 [{page.full_path}] 规划测试用例（纯规划模式）")
         await log_callback("info", f"📄 源码长度(已滤除样式): {len(source_code)} 字符")
         await log_callback("info", f"🌐 页面URL: {project.base_url}{page.path}")
-        await log_callback("info", f"📊 轨迹数据: {'已获取' if dom_data else '未获取'} ({len(str(dom_data)) if dom_data else 0} 字符)")
+        await log_callback("info", f"📊 轨迹数据: {'已获取' if intent_plan else '未获取'} ({len(str(intent_plan)) if intent_plan else 0} 字符)")
         
         input_data = TestCaseInput(
             page_url=f"{project.base_url}{page.path}",
             file_path=page.file_path or "", 
             source_code=source_code,
-            dom_data=dom_data
+            intent_plan=intent_plan
         )
         result = await agent.generate(input_data)
         

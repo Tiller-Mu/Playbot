@@ -15,12 +15,12 @@ from jinja2 import Environment, FileSystemLoader
 
 from .langfuse_utils import get_langfuse_callback_handler
 from .schemas import AgentConfig, TestCaseInput
-from app.schemas.test_schema import TestPlanBlueprint, TestPlanCase, SemanticStep
+from app.models.semantic_ir import TestPlanBlueprint, TestPlanCase, SemanticStep
 
 class AgentState(TypedDict, total=False):
     input_data: TestCaseInput
     source_code: str
-    dom_data: Any
+    intent_plan: Any
     
     page_summary: str
     element_whitelist: Dict[str, Any]
@@ -63,19 +63,19 @@ class TestCaseAgent:
                 else:
                     source_code = ""
             
-            dom_data = state.get("dom_data")
-            if not dom_data:
-                json_path = state["input_data"].dom_json_path
+            intent_plan = state.get("intent_plan")
+            if not intent_plan:
+                json_path = state["input_data"].intent_json_path
                 if json_path and os.path.exists(json_path):
                     try:
                         with open(json_path, "r", encoding="utf-8") as f:
-                            dom_data = json.load(f)
+                            intent_plan = json.load(f)
                     except:
                         pass
 
-            system_prompt = "你是一个专业的前端功能分析师。请根据提供的 Vue 源码和真实用户的基准交互流（ActionTrace），用不超过 50 个字的简练中文，总结这个页面的核心功能和交互主体。"
+            system_prompt = "你是一个专业的前端功能分析师。请根据提供的 Vue 源码和真实用户的基准交互流（Intent Plan / ActionTrace），用不超过 50 个字的简练中文，总结这个页面的核心功能和交互主体。"
             import json
-            user_prompt = f"【Vue源码】\n```\n{source_code[:5000]}\n```\n\n【动作轨迹概览(带DOM片段)】\n{json.dumps(dom_data, ensure_ascii=False)[:3000]}"
+            user_prompt = f"【Vue源码】\n```\n{source_code[:5000]}\n```\n\n【动作轨迹概览(带DOM片段)】\n{json.dumps(intent_plan, ensure_ascii=False)[:3000]}"
             
             try:
                 response = await self.config.llm_caller([
@@ -83,7 +83,7 @@ class TestCaseAgent:
                     {"role": "user", "content": user_prompt}
                 ])
                 logs_delta.append(await self._log("success", f"✅ 上下文分析完成: {response.strip()}"))
-                return {"page_summary": response.strip(), "source_code": source_code, "dom_data": dom_data, "logs": logs_delta}
+                return {"page_summary": response.strip(), "source_code": source_code, "intent_plan": intent_plan, "logs": logs_delta}
             except Exception as e:
                 logs_delta.append(await self._log("error", f"❌ 上下文分析失败: {e}"))
                 return {"error": f"上下文分析失败: {e}", "logs": logs_delta}
@@ -92,21 +92,23 @@ class TestCaseAgent:
             logs_delta = [await self._log("info", "🧠 [步骤2] 调度大模型输出测试用例规划大纲...")]
             summary = state.get("page_summary", "")
             source_code = state.get("source_code", "")
-            action_trace = state.get("dom_data", {})
+            action_trace = state.get("intent_plan", {})
             import json
             
             system_prompt = """你是一个专业的自动化测试架构师。
-你的任务是根据给定的页面源码、页面核心功能摘要，以及用户录制的真实交互基准流（ActionTrace，内含局部 HTML 片段），自由发散并设计出最合适的测试用例大纲。
+你的任务是根据给定的页面源码、页面核心功能摘要，以及用户录制的真实交互基准流（IntentPlan / ActionTrace），自由发散并设计出最合适的测试用例大纲。
+
+【最高指令红线：信息防丢】：
+1. 你的输出将被送入下游的“运行时执行引擎 (Execution Engine)”。你不能生造任何 CSS Selector，你只需提取特征线索。
+2. 你必须仔细观察传入的 ActionTrace 记录，如果轨迹目标元素中带有 `recorded_selector` (或者是被映射过来的原 `path`) 和 `dom_fragment`，你必须**原封不动、一字不落**地将其抄写入返回 JSON 的对应字段中！这是后续引擎能够成功防丢兜底的关键！
 
 【核心产出规范】：
-你的输出将被送入下游的“运行时执行引擎 (Execution Engine)”。你绝对不能写 CSS Selector，你只需提供寻找元素的【特征线索】和【沙盒范围】。
-
 1. 【沙盒范围 target_component】: 必须根据 Vue 源码提取该元素所在组件的文件路径（如 src/views/User.vue）。这极其重要，执行引擎将以此限制 DOM 搜索范围！
-2. 【目标特征 target_hint】: 提供明确的元素特征字典，包含 text(可见文本), tag(如button, input), role(如button, textbox), placeholder。
-   -> 特别注意：你必须仔细观察 ActionTrace 中的记录，如果轨迹中提供了该元素的 selector 或 xpath，请原封不动地将其填入 `recorded_selector` 字段！这将作为执行引擎的终极兜底策略！
+2. 【目标特征 target_hint】: 提供明确的元素特征字典，包含 text(可见文本), tag(如button, input), role(如button, textbox), placeholder, recorded_selector(原封不动透传), dom_fragment(原封不动透传)。
 3. 【上下文特征 context_hint】: 提供父容器或区块特征字典，如 {"parent": "form", "section": "footer"}，帮助引擎在复杂嵌套中定位。
-4. 【无断言不测试】: 在每个测试用例的关键操作之后，必须规划出断言步骤（如 expect_visible 或 expect_text）。
-5. 考虑异常边界流：除正向流程外，发散构思空值校验、格式错误拦截等异常测试。"""
+4. 【操作参数 value】: navigate 动作必须在此填入完整的目标 URL（如 https://example.com/page）。fill / select / expect_text 等动作亦用此字段传递参数。切勿将导航 URL 填入 url 字段——url 字段仅供录制元数据使用！
+5. 【无断言不测试】: 在每个测试用例的关键操作之后，必须规划出断言步骤（如 expect_visible 或 expect_text）。
+6. 考虑异常边界流：除正向流程外，发散构思空值校验、格式错误拦截等异常测试。"""
             
             user_prompt = f"""【页面核心功能摘要】:
 {summary}
@@ -120,7 +122,7 @@ class TestCaseAgent:
 请根据以上信息，不限数量地输出最完整、最严谨的 TestPlanBlueprint 测试用例规划！"""
             
             try:
-                from app.schemas.test_schema import TestPlanBlueprint
+                from app.models.semantic_ir import TestPlanBlueprint
                 if self.config.structured_llm_caller:
                     blueprint = await self.config.structured_llm_caller(
                         [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], 
@@ -157,7 +159,7 @@ class TestCaseAgent:
         return {
             "input_data": input_data,
             "source_code": input_data.source_code or "",
-            "dom_data": input_data.dom_data,
+            "intent_plan": input_data.intent_plan,
             "page_summary": "",
             "element_whitelist": {},
             "test_cases": [],

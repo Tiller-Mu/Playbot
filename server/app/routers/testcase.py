@@ -87,32 +87,32 @@ async def nl_edit_testcase(
     if not tc:
         raise HTTPException(404, "用例不存在")
 
+    from app.models.semantic_ir import TestCasePlan
+    schema_json = json.dumps(TestCasePlan.model_json_schema(), ensure_ascii=False)
     messages = [
         {
             "role": "system",
             "content": (
-                "你是一个 Playwright Python 测试脚本专家。"
-                "用户会给你一个现有的测试用例（包含自然语言描述和 Python 测试代码），"
+                "你是一个专业的测试用例规划专家。"
+                "用户会给你一个现有的测试用例大纲（JSON 格式的 TestCasePlan），"
                 "以及一条自然语言修改指令。"
-                "请根据指令修改测试用例，返回更新后的自然语言描述和完整的 Python 测试代码。\n\n"
-                "要求：\n"
-                "1. 使用 pytest + playwright (sync_api)\n"
-                "2. 测试函数参数为 page: Page\n"
-                "3. 使用 expect() 做断言\n"
-                "4. 【极端重要】对于任何元素的点击操作（`.click()`），尤其是前端UI组件库（如 Ant Design 的 Select，Dropdown 等），常常由于内部复杂的 span 层级导致 `intercepts pointer events` 错误。你必须在所有的 click 操作中加上 `force=True`（例如 `locator.click(force=True)`），强制跳过默认遮挡检测。\n"
-                "5. 避开严格模式(Strict Mode)与精准定位：严禁无脑使用 .first！应优先使用 exact=True (如 get_by_text('xx', exact=True))、get_by_role('option')、filter(visible=True) 或限定父级范围，确保命中需要真实交互的元素。\n"
-                "6. 代码中加中文注释说明每个步骤\n"
-                "7. 只返回 JSON 格式: {\"description\": \"...\", \"script_content\": \"...\"}\n"
-                "8. 【定位器高危警告】绝对不要生造元素的标签名（如凭空写出 `div#provider-select`，直接写 `#provider-select` 即可）。严禁使用多个 `.locator(...).locator(...)` 级联去强行寻找内部 span！直接对带有特征（如 ID 或 class）的元素执行 `.click(force=True)` 即可！"
+                "请根据指令修改测试用例大纲，返回更新后的 JSON 计划。\n\n"
+                "【核心原则】\n"
+                "1. 你绝对不能写任何 Python 代码、Playwright API、CSS Selector。\n"
+                "2. 你只输出语义化的步骤描述，包含: action(动作类型)、target_hint(元素特征)、intent_reason(业务意图)。\n"
+                "3. target_hint 必须包含 text(可见文本)、tag(标签名)、role(ARIA角色) 等线索。\n"
+                "4. 保留原计划中的 dom_fragment 和 recorded_selector，它们是执行引擎的兜底策略。\n"
+                "5. 每个关键操作后必须规划断言步骤（如 expect_visible 或 expect_text）。\n"
+                f"6. 只返回 JSON 格式，严格遵循以下 Schema:\n{schema_json}\n"
             ),
         },
         {
             "role": "user",
             "content": (
                 f"当前用例标题: {tc.title}\n"
-                f"当前自然语言描述:\n{tc.description}\n\n"
-                f"当前测试代码:\n```python\n{tc.script_content or '# 暂无代码'}\n```\n\n"
-                f"修改指令: {data.instruction}"
+                f"当前用例计划 (TestCasePlan JSON):\n{tc.description}\n\n"
+                f"修改指令: {data.instruction}\n\n"
+                "请直接返回修改后的 TestCasePlan JSON。"
             ),
         },
     ]
@@ -129,8 +129,10 @@ async def nl_edit_testcase(
     except json.JSONDecodeError:
         raise HTTPException(500, f"LLM 返回格式错误: {raw[:200]}")
 
-    tc.description = result.get("description", tc.description)
-    tc.script_content = result.get("script_content", tc.script_content)
+    # result 是 TestCasePlan JSON，整体存入 description 供 ExecutionEngine 消费
+    tc.description = json.dumps(result, ensure_ascii=False, indent=2)
+    # script_content 保留旧值，执行引擎从 description 读取 JSON Plan
+    tc.script_content = tc.script_content or ""
     await db.commit()
     await db.refresh(tc)
 
@@ -175,8 +177,8 @@ async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
     if trace:
         trace_context = trace.trace_data
 
-    from app.schemas.test_schema import TestPlanCase
-    schema_json = json.dumps(TestPlanCase.model_json_schema(), ensure_ascii=False)
+    from app.models.semantic_ir import TestCasePlan
+    schema_json = json.dumps(TestCasePlan.model_json_schema(), ensure_ascii=False)
 
     system_prompt = (
         "你是一个顶级的 Playwright QA 自动化测试审核专家 (Auditor)。\n"
@@ -185,7 +187,8 @@ async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
         "【核心审查原则】\n"
         "1. 查找缺失的触发动作：很多时候初稿会在没有点击“保存/验证/提交”按钮的情况下，直接去 `expect_visible` 等待 Toast 提示出现。这是极其愚蠢的跳步！你必须仔细对比源码，发现这种断言前遗漏的点击或输入操作，并将它们补充到步骤列表中。\n"
         "2. 修复无效的选择器：检查 target_hint 中的内容是否过于含糊，如果 ActionTrace 提供了更有力的属性，补充进去。\n"
-        "3. 纯净输出：直接输出原生 JSON，禁止使用 markdown 代码块包裹，不要包含任何前后缀解释文字！\n"
+        "3. navigate 动作用 value 字段填 URL：导航目标 URL 必须填入 value 字段，绝对不能填入 url 字段（url 是录制元数据）。\n"
+        "4. 纯净输出：直接输出原生 JSON，禁止使用 markdown 代码块包裹，不要包含任何前后缀解释文字！\n"
         f"必须严格遵循以下 Schema 输出 JSON 对象：\n{schema_json}"
     )
 
@@ -237,7 +240,7 @@ async def compile_testcase(case_id: str, db: AsyncSession = Depends(get_db)):
         if isinstance(parsed_obj, list) and len(parsed_obj) > 0:
             parsed_obj = parsed_obj[0]
             
-        refined_case = TestPlanCase.model_validate(parsed_obj)
+        refined_case = TestCasePlan.model_validate(parsed_obj)
         
         json_content = refined_case.model_dump_json(indent=2, ensure_ascii=False)
         tc.description = json_content

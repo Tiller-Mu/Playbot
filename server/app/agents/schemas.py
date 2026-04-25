@@ -23,6 +23,6 @@ class TestCaseInput(BaseModel):
     file_path: Optional[str] = Field(None, description="【推荐】只传路径，让智能体自行提取")
     source_code: Optional[str] = Field(None, description="【备选】直接传入读取完毕的字符串")
     
-    # 3. 页面DOM碎片（智能体通过读取本地录制结果解析 或者 直传）
-    dom_json_path: Optional[str] = Field(None, description="【推荐】系统存放在工作区的录制 DOM JSON 数据快照绝对路径")
-    dom_data: Optional[Any] = Field(None, description="【备选】直接传入序列化的 Python Dict 对象（预先准备好的DOM）")
+    # 3. 页面DOM碎片或动作轨迹（智能体通过读取本地录制结果解析 或者 直传）
+    intent_json_path: Optional[str] = Field(None, description="【推荐】系统存放在工作区的录制交互 Intent JSON 数据快照绝对路径")
+    intent_plan: Optional[Any] = Field(None, description="【备选】直接传入序列化的 Python Dict 对象（预先准备好的交互记录）")

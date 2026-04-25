@@ -1,14 +1,25 @@
 import logging
 from typing import List, Dict, Any
-from app.models.semantic_ir import SemanticAction, ActionType, TargetElement
+from app.models.semantic_ir import SemanticStep, ActionType, TargetHint
 
 log = logging.getLogger(__name__)
 
 class ActionNormalizer:
     @staticmethod
-    def normalize(actions: list[dict]) -> List[SemanticAction]:
+    def _extract_selector(raw: dict) -> str:
+        attrs = raw.get('attrs', {})
+        if 'data-testid' in attrs:
+            return f"[data-testid='{attrs['data-testid']}']"
+        if 'id' in attrs:
+            return f"#{attrs['id']}"
+        if 'name' in attrs:
+            return f"[name='{attrs['name']}']"
+        return raw.get('path', '')
+
+    @staticmethod
+    def normalize(actions: list[dict]) -> List[SemanticStep]:
         """
-        Takes raw action_history items and returns a list of SemanticActions.
+        Takes raw action_history items and returns a list of SemanticSteps.
         """
         raw_steps = []
         network_events = []
@@ -34,14 +45,16 @@ class ActionNormalizer:
                 i += 1
                 continue
                 
-            target = TargetElement(
+            target_hint = TargetHint(
                 tag=raw.get('tag', 'unknown'),
-                attributes=raw.get('attrs', {}),
                 text=raw.get('text', ''),
-                component=raw.get('component'),
-                path=raw.get('path', ''),
-                dom_fragment=raw.get('dom_fragment', '')
+                role=raw.get('attrs', {}).get('role'),
+                placeholder=raw.get('attrs', {}).get('placeholder'),
+                dom_fragment=raw.get('dom_fragment', ''),
+                recorded_selector=ActionNormalizer._extract_selector(raw)
             )
+            
+            target_component = raw.get('component')
             
             if act_type == 'input':
                 final_val = raw.get('value', '')
@@ -52,7 +65,7 @@ class ActionNormalizer:
                         final_val = next_act.get('raw_data', {}).get('value', '')
                         j += 1
                     else: break
-                raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.FILL, target=target, url=url, value=final_val)))
+                raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.FILL, target_hint=target_hint, target_component=target_component, url=url, value=final_val)))
                 i = j - 1
                 
             elif act_type == 'click':
@@ -60,28 +73,29 @@ class ActionNormalizer:
                 j = i + 1
                 while j < len(actions) and actions[j].get('raw_data', {}).get('action') == 'click' and actions[j].get('raw_data', {}).get('path') == raw.get('path'):
                     j += 1
-                raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.CLICK, target=target, url=url)))
+                raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.CLICK, target_hint=target_hint, target_component=target_component, url=url)))
                 i = j - 1
                 
             elif act_type == 'keydown':
                 if raw.get('value') == 'Enter':
                     # 提纯出表单提交的意图
-                    raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.SUBMIT_FORM, target=target, url=url)))
+                    raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.SUBMIT_FORM, target_hint=target_hint, target_component=target_component, url=url)))
                 
             elif act_type == 'hover':
-                raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.HOVER, target=target, url=url)))
+                raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.HOVER, target_hint=target_hint, target_component=target_component, url=url)))
                 
             elif act_type == 'virtual_navigate':
-                raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.VIRTUAL_NAVIGATE, url=url)))
+                raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.VIRTUAL_NAVIGATE, url=url)))
                 
             elif act_type == 'title_changed':
-                raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.SWITCH_VIEW, url=url, value=raw.get('value'))))
+                raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.SWITCH_VIEW, url=url, value=raw.get('value'))))
                 
             elif act_type == 'handle_dialog':
-                raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.HANDLE_DIALOG, url=url, value=raw.get('value'), target=TargetElement(tag='dialog', attributes={'type': raw.get('type')}, text=raw.get('value')))))
+                dialog_target_hint = TargetHint(tag='dialog', text=raw.get('value'))
+                raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.HANDLE_DIALOG, url=url, value=raw.get('value'), target_hint=dialog_target_hint)))
                 
             elif act_type == 'upload_file':
-                raw_steps.append((act.get('time', 0), SemanticAction(action=ActionType.UPLOAD_FILE, url=url)))
+                raw_steps.append((act.get('time', 0), SemanticStep(action=ActionType.UPLOAD_FILE, url=url)))
                 
             i += 1
 
@@ -98,13 +112,13 @@ class ActionNormalizer:
                     t2, next_step = raw_steps[j]
                     if next_step.action == ActionType.CLICK and (t2 - t1) < 2.5: # 2.5秒内的二次点击
                         # 判断是否是从父容器点击菜单项 (典型的下拉框 / Popup)
-                        is_portal = next_step.target and ('li' in next_step.target.tag or 'option' in next_step.target.tag or 'menu' in next_step.target.path)
-                        is_combobox = step.target and ('role' in step.target.attributes and step.target.attributes['role'] in ['combobox', 'button'])
+                        is_portal = next_step.target_hint and ('li' in next_step.target_hint.tag or 'option' in next_step.target_hint.tag or (next_step.target_hint.recorded_selector and 'menu' in next_step.target_hint.recorded_selector))
+                        is_combobox = step.target_hint and (step.target_hint.role in ['combobox', 'button'])
                         
                         if is_portal or is_combobox:
                             # 折叠为 SELECT
                             step.action = ActionType.SELECT
-                            step.value = next_step.target.text if next_step.target else ""
+                            step.value = next_step.target_hint.text if next_step.target_hint else ""
                             i = j # 吞并第二个点击
                             found_composite = True
                             break
@@ -118,7 +132,7 @@ class ActionNormalizer:
         for timestamp, step in refined_steps:
             # Inject native navigation
             if step.url and step.url != last_url and step.action not in [ActionType.VIRTUAL_NAVIGATE, ActionType.SWITCH_VIEW]:
-                final_steps.append(SemanticAction(action=ActionType.NAVIGATE, url=step.url))
+                final_steps.append(SemanticStep(action=ActionType.NAVIGATE, url=step.url))
                 last_url = step.url
                 
             if step.action in [ActionType.VIRTUAL_NAVIGATE, ActionType.SWITCH_VIEW]:

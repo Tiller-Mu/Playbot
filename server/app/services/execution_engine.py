@@ -12,34 +12,102 @@ class ResolveError(Exception):
         self.message = message
         super().__init__(self.message)
 
+class StepExecutionError(Exception):
+    def __init__(self, step_index: int, step: dict, message: str, original_error: Exception = None):
+        self.step_index = step_index
+        self.step = step
+        self.message = message
+        self.original_error = original_error
+        super().__init__(f"Step {step_index} failed: {self.message}")
+
 class PlaybotExecutionEngine:
-    def __init__(self, page: Page):
+    def __init__(self, page: Page, credentials: Optional[Dict[str, str]] = None):
         self.page = page
+        self.credentials = credentials
+
+    def _auto_login_if_needed(self):
+        if not self.credentials:
+            return
+            
+        username = self.credentials.get("username")
+        password = self.credentials.get("password")
+        login_url = self.credentials.get("login_url")
+        
+        if not username or not password:
+            return
+            
+        try:
+            current_url = self.page.url
+            if "login" in current_url.lower() or (login_url and login_url in current_url):
+                logger.info("拦截到登录态缺失，正在执行启发式自动登录...")
+                
+                username_loc = self.page.get_by_placeholder("用户名")
+                if username_loc.count() == 0:
+                     username_loc = self.page.locator("input[type='text'], input[name='username'], input[id*='user']")
+                if username_loc.count() > 0:
+                    username_loc.first.fill(username)
+                    
+                password_loc = self.page.locator("input[type='password']")
+                if password_loc.count() > 0:
+                    password_loc.first.fill(password)
+                    
+                submit_btn = self.page.locator("button[type='submit'], button:has-text('登录'), button:has-text('Login')")
+                if submit_btn.count() > 0:
+                    submit_btn.first.click()
+                    self.page.wait_for_load_state("networkidle")
+                    logger.info("自动登录执行完毕")
+        except Exception as e:
+            logger.warning(f"自动登录尝试失败: {e}")
 
     def execute_plan(self, steps: List[dict]):
-        for step_data in steps:
+        self._auto_login_if_needed()
+        
+        # 记录当前页面状态和即将执行的计划
+        try:
+            logger.info(f"Starting plan execution. Current URL: {self.page.url}, Steps count: {len(steps)}")
+            for i, s in enumerate(steps):
+                sd = s if isinstance(s, dict) else dict(s)
+                logger.debug(f"  Step {i}: action={sd.get('action')}, intent={sd.get('intent_reason')}, value={sd.get('value')}")
+        except Exception:
+            pass
+        
+        for index, step_data in enumerate(steps):
             step = step_data if isinstance(step_data, dict) else dict(step_data)
             
-            logger.info(f"Executing step: {step.get('action')} - {step.get('intent_reason')}")
-            
-            start_resolve = time.time()
-            locator = self._resolve_locator(step)
-            resolve_time = time.time() - start_resolve
-            logger.info(f"[Timer] _resolve_locator took {resolve_time:.2f} seconds")
-            
-            if locator is None and step.get("action") not in ["navigate", "custom_script"]:
-                snapshot = "Could not capture snapshot"
-                if step.get("action") == "expect_visible":
-                    raise AssertionError(f"UI 断言失败：预期的元素（{step.get('intent_reason', '未知')}）在超时时间内未出现。\n寻址目标: {step.get('target_hint')}")
-                else:
-                    raise ResolveError(step, f"UI 寻址失败：无法找到操作目标（{step.get('intent_reason', '未知')}）。\n寻址目标: {step.get('target_hint')}")
+            try:
+                logger.info(f"Executing step {index}: {step.get('action')} - {step.get('intent_reason')}")
                 
-            start_exec = time.time()
-            self._execute_action(locator, step)
-            exec_time = time.time() - start_exec
-            logger.info(f"[Timer] _execute_action took {exec_time:.2f} seconds")
-            
-            self._post_validate(step)
+                start_resolve = time.time()
+                locator = self._resolve_locator(step)
+                resolve_time = time.time() - start_resolve
+                logger.info(f"[Timer] _resolve_locator took {resolve_time:.2f} seconds")
+                
+                if locator is None and step.get("action") not in ["navigate", "custom_script", "virtual_navigate", "switch_view"]:
+                    if step.get("action") == "expect_visible":
+                        page_info = ""
+                        try:
+                            page_info = f"\n当前页面 URL: {self.page.url}"
+                        except Exception:
+                            pass
+                        raise AssertionError(f"UI 断言失败：预期的元素（{step.get('intent_reason', '未知')}）在超时时间内未出现。\n寻址目标: {step.get('target_hint')}{page_info}")
+                    else:
+                        page_info = ""
+                        try:
+                            page_info = f"\n当前页面 URL: {self.page.url}"
+                        except Exception:
+                            pass
+                        raise ResolveError(step, f"UI 寻址失败：无法找到操作目标（{step.get('intent_reason', '未知')}）。\n寻址目标: {step.get('target_hint')}{page_info}")
+                    
+                start_exec = time.time()
+                self._execute_action(locator, step)
+                exec_time = time.time() - start_exec
+                logger.info(f"[Timer] _execute_action took {exec_time:.2f} seconds")
+                
+                self._post_validate(step)
+            except Exception as e:
+                if isinstance(e, StepExecutionError):
+                    raise
+                raise StepExecutionError(step_index=index, step=step, message=str(e), original_error=e)
 
     def _get_scopes(self, step: dict) -> List[Locator]:
         scopes = []
@@ -176,7 +244,8 @@ class PlaybotExecutionEngine:
 
     def _validate(self, locator: Locator) -> bool:
         try:
-            return locator.count() == 1 and locator.is_visible()
+            # 如果匹配出多个，取第一个来判断可见性，避免严格模式报错
+            return locator.count() > 0 and locator.first.is_visible()
         except:
             return False
 
@@ -185,11 +254,17 @@ class PlaybotExecutionEngine:
         if not hint:
             return None
             
-        timeout_sec = 15.0 if step.get("action") == "expect_visible" else 5.0
+        # 兜底等待 8 秒（严格路径已做过 3s 可见性等待）
+        timeout_sec = 8.0
         start_time = time.time()
         
         candidates = []
         if hint.get("text"):
+            # 如果有 tag 和 text 联合
+            if hint.get("tag"):
+                # 处理单引号问题
+                safe_text = hint["text"].replace('"', '\\"')
+                candidates.append(("tag + text", self.page.locator(f'{hint["tag"]}:has-text("{safe_text}")')))
             candidates.append(("exact text", self.page.get_by_text(hint["text"], exact=True)))
             candidates.append(("fuzzy text", self.page.get_by_text(hint["text"], exact=False)))
             
@@ -201,24 +276,32 @@ class PlaybotExecutionEngine:
             
         if hint.get("recorded_selector"):
             selector = hint["recorded_selector"]
-            if selector.count("> div") < 5:
-                candidates.append(("recorded_selector", self.page.locator(selector)))
+            candidates.append(("recorded_selector", self.page.locator(selector)))
 
         while time.time() - start_time < timeout_sec:
             for strategy, loc in candidates:
                 try:
                     if loc.count() > 0:
-                        logger.info(f"Fallback succeeded using {strategy}")
+                        # 找到元素后最好再确认一下它是否真的可用，但这里作为 fallback，只要求在 DOM 树中即可
+                        logger.info(f"Fallback succeeded using strategy: '{strategy}'")
                         return loc.first
-                except Exception:
-                    pass
-            time.sleep(0.5)
+                except Exception as e:
+                    # 如果某个选择器语法错误，将其记录，但不要阻断其他循环
+                    logger.debug(f"Fallback strategy '{strategy}' error: {e}")
+            time.sleep(0.2)
             
+        # 所有 fallback 策略均耗尽，记录当前页面信息以便诊断
+        try:
+            current_url = self.page.url
+            current_title = self.page.title()
+            logger.warning(f"Fallback exhausted all {len(candidates)} strategies. Current page: url={current_url}, title={current_title}")
+        except Exception:
+            logger.warning(f"Fallback exhausted all {len(candidates)} strategies. Unable to read current page info.")
         return None
 
     def _resolve_locator(self, step: dict) -> Optional[Locator]:
         # 对于不需要目标的操作，直接返回 None
-        if step.get("action") in ["navigate", "custom_script"]:
+        if step.get("action") in ["navigate", "custom_script", "virtual_navigate", "switch_view"]:
             return None
             
         scopes = self._get_scopes(step)
@@ -238,6 +321,13 @@ class PlaybotExecutionEngine:
                 if self._validate(best["locator"]):
                     self._log_step(step, candidates, best)
                     return best["locator"]
+                # 候选元素在 DOM 中存在但不可见，短等一下渲染（避免直接掉入 15s fallback）
+                try:
+                    best["locator"].first.wait_for(state="visible", timeout=3000)
+                    self._log_step(step, candidates, best)
+                    return best["locator"]
+                except Exception:
+                    pass
 
         # 如果都没通过 validate，记录日志并尝试 Fallback
         self._log_step(step, all_candidates_info, None)
@@ -249,11 +339,18 @@ class PlaybotExecutionEngine:
         value = step.get("value")
 
         if action == "navigate":
-            if value:
+            nav_url = value or step.get("url")
+            if nav_url:
                 try:
-                    self.page.goto(value, wait_until="domcontentloaded", timeout=15000)
+                    self.page.goto(nav_url, wait_until="domcontentloaded", timeout=15000)
                 except Exception as e:
-                    logger.warning(f"Navigation to {value} timed out or failed: {e}")
+                    raise RuntimeError(f"导航失败: {nav_url} - {e}")
+                # SPA 组件渲染等待：networkidle 确保异步组件已挂载
+                try:
+                    self.page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    logger.debug(f"networkidle wait timed out for {nav_url}, continuing anyway")
+                self.page.wait_for_timeout(500)
         elif action == "click":
             locator.click(force=True)
         elif action == "fill":
@@ -268,6 +365,9 @@ class PlaybotExecutionEngine:
             locator.hover(force=True)
         elif action == "press":
             locator.press(value)
+        elif action in ("virtual_navigate", "switch_view"):
+            # 录制元数据：SPA 路由切换 / 视图切换已在之前的操作中完成，无需额外执行
+            pass
         elif action == "expect_visible":
             from playwright.sync_api import expect
             expect(locator).to_be_visible()
